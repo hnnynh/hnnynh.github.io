@@ -1,6 +1,4 @@
 ---
-import { POSTS_PER_PAGE } from "../../../config.ts";
-
 import { getBlogPosts } from "src/utils";
 import PostList from "$layouts/PostList.astro";
 
@@ -20,21 +18,13 @@ export async function getStaticPaths() {
     props: { tag: string; index: number };
   }[] = [];
 
-  Array.from(tags).forEach(([tag, count]) => {
+  Array.from(tags).forEach(([tag]) => {
     const sanitizedTag = tag.split(" ").join("-");
-    const totalPages = Math.ceil(count / POSTS_PER_PAGE);
 
     paths.push({
       params: { tag: sanitizedTag },
       props: { tag, index: 1 },
     });
-
-    for (let i = 1; i <= totalPages; i++) {
-      paths.push({
-        params: { tag: sanitizedTag, index: i.toString() },
-        props: { tag, index: i },
-      });
-    }
   });
 
   return paths;
@@ -42,17 +32,21 @@ export async function getStaticPaths() {
 
 const { tag, index } = Astro.props;
 
-const posts = (await getBlogPosts())
-  .filter((post: any) => post.data.tags?.includes(tag))
-  .splice((index - 1) * POSTS_PER_PAGE, POSTS_PER_PAGE);
-
-const total = Math.ceil(
-  (await getBlogPosts()).filter((post: any) => post.data.tags?.includes(tag))
-    .length / POSTS_PER_PAGE
+const allPosts = await getBlogPosts();
+const posts = allPosts.filter((post: any) =>
+  post.data.tags?.includes(tag)
 );
+
+const total = 1;
 ---
 
-<PostList {posts} totalPages={total} currentPage={index ?? 1} {tag}>
+<PostList
+  {posts}
+  totalPages={total}
+  currentPage={index ?? 1}
+  {tag}
+  sidebarPosts={allPosts}
+>
   <h1 class="inline-flex gap-4 flex-col sm:flex-row sm:items-center">
     Posts tagged with <div>
       <p

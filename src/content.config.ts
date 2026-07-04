@@ -39,6 +39,12 @@ const blog = defineCollection({
     // array of tags
     tags: z.array(z.string()).optional(),
 
+    // primary category for sidebar grouping
+    category: z.string().optional(),
+
+    // optional multiple categories for sidebar grouping
+    categories: z.array(z.string()).optional(),
+
     // whether to hide the hero image in the blog post
     hideHero: z.boolean().optional(),
 

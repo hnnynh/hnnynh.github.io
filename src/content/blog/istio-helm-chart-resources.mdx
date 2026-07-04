@@ -1,0 +1,1063 @@
+---
+title: "Istio Helm Chart, Gateway API, and Kubernetes Resources"
+description: "A quick reference for Istio, Gateway API, and Kubernetes resources created by Istio Helm charts"
+pubDate: "Mar 21 2026"
+published: true
+category: "Istio"
+tags: ["Istio", "Kubernetes"]
+---
+
+> Translated from the original Velog post: [Istio Helm Chart Resrouces](https://velog.io/@hnnynh/Istio-Helm-Chart-Resrouces)
+
+A summary of the resource kinds that can be created by the [Istio Helm chart](https://github.com/istio/istio/tree/master/manifests/charts).
+
+Additional Kubernetes resources are covered briefly.
+All example YAML files were generated with AI and are not tied to any specific environment.
+
+## Kubernetes Resources
+
+### apiextensions.k8s.io/v1/`CustomResourceDefinition`
+
+- `clusterScoped: true`
+
+```yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: virtualservices.networking.istio.io
+spec:
+  group: networking.istio.io
+  names:
+    kind: VirtualService
+    plural: virtualservices
+    singular: virtualservice
+    shortNames:
+      - vs
+  scope: Namespaced
+  versions:
+    - name: v1beta1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                hosts:
+                  type: array
+                  items:
+                    type: string
+                http:
+                  type: array
+                  items:
+                    type: object
+```
+
+### admissionregistration.k8s.io/v1/`MutatingWebhookConfiguration`
+
+> A resource that connects the API server to an external webhook so matching objects can be modified, or mutated, when requests are received.
+
+`mutatingAdmissionWebhook` is used to modify objects entering the API server, such as applying defaults or injecting sidecars.
+
+- `clusterScoped: true`
+- `specless: true`
+
+```yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: istio-sidecar-injector
+webhooks:
+  - name: sidecar-injector.istio.io # DNS format, unique
+    admissionReviewVersions:
+      - v1
+    sideEffects: None
+    failurePolicy: Fail
+    reinvocationPolicy: IfNeeded
+    timeoutSeconds: 10
+    clientConfig:
+      service:
+        name: istiod # Service that handles the actual webhook request
+        namespace: istio-system
+        path: /inject
+        port: 443
+      caBundle: <BASE64>
+
+    namespaceSelector:
+      matchExpressions:
+        - key: istio-injection # Common opt-in approach: inject only when the namespace has this label
+          operator: In
+          values:
+            - enabled
+    rules: # Mutation target, for example Pod
+      - operations: ["CREATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+        scope: Namespaced
+```
+
+### admissionregistration.k8s.io/v1/`ValidatingWebhookConfiguration`
+
+> A configuration that checks whether Kubernetes resources are valid before they are created or modified, and rejects invalid requests.
+
+- `clusterScoped: true`
+- `builtin: true`
+- `specless: true`
+
+```yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: istio-validator-istio-system
+  labels:
+    app: istiod
+    istio: istiod
+    istio.io/rev: default
+    release: istio
+    app.kubernetes.io/name: istiod
+webhooks:
+  - name: rev.validation.istio.io
+    admissionReviewVersions:
+      - v1
+    sideEffects: None
+    matchPolicy: Equivalent
+    timeoutSeconds: 10
+    failurePolicy: Ignore # Fail open until the webhook is ready, then patch to Fail
+
+    clientConfig:
+      service:
+        name: istiod
+        namespace: istio-system
+        path: /validate
+        port: 443
+      caBundle: <BASE64_CA_BUNDLE>
+    objectSelector: # Validation target
+      matchExpressions:
+        - key: istio.io/rev
+          operator: In
+          values:
+            - default
+    rules: # Validation rules
+      - operations:
+          - CREATE
+          - UPDATE
+        apiGroups:
+          - security.istio.io
+          - networking.istio.io
+          - telemetry.istio.io
+          - extensions.istio.io
+        apiVersions:
+          - "*"
+        resources:
+          - "*"
+        scope: "*"
+```
+
+### k8s.io.api.apps/v1/`Deployment`
+
+- A controller that declaratively deploys Pods and manages rolling updates and rollbacks.
+
+### k8s.io.api.core/v1/`Endpoint`
+
+- A list of Pod IPs that a Service actually forwards traffic to. This is the older mechanism.
+
+### k8s.io.api.discovery/v1/`EndpointSlice`
+
+- The newer Service backend information resource that partitions Endpoints for better scalability.
+
+### k8s.io.api.core/v1/`Namespace`
+
+- `clusterScoped: true`
+- A unit for logically separating cluster resources, often used for multi-tenancy.
+
+### k8s.io.api.core/v1/`Node`
+
+- `clusterScoped: true`
+- State and resource information for worker machines, such as EC2 instances, that belong to the cluster.
+
+### k8s.io.api.core/v1/`Pod`
+
+- The smallest Kubernetes unit that runs containers.
+
+### k8s.io.api.apps/v1/`DaemonSet`
+
+- A controller that deploys one Pod on every node, or on a selected set of nodes.
+
+### k8s.io.api.apps/v1/`StatefulSet`
+
+- A controller for stateful applications that need stable names, storage, and ordering.
+
+### k8s.io.api.core/v1/`Secret`
+
+- A resource for storing sensitive data such as passwords and tokens.
+
+### k8s.io.api.core/v1/`Service`
+
+- A resource that provides stable network access, such as ClusterIP or LoadBalancer, to a set of Pods.
+
+### k8s.io.api.core/v1/`ConfigMap`
+
+- A resource for storing application configuration values as key-value data.
+
+### k8s.io.api.core/v1/`ServiceAccount`
+
+- The identity that Pods use when accessing the API server.
+
+### k8s.io.api.certificates/v1/`CertificateSigningRequest`
+
+- A request object for issuing TLS certificates inside the cluster.
+- `clusterScoped: true`
+
+### k8s.io.api.certificates/v1beta1/`ClusterTrustBundle`
+
+- A resource for sharing trusted CA certificates across the cluster.
+- `clusterScoped: true`
+
+### k8s.io.api.networking/v1/`Ingress`
+
+- Rules for routing HTTP and HTTPS traffic from outside the cluster to Services.
+
+### k8s.io.api.networking/v1/`IngressClass`
+
+- Defines which Ingress controller should handle a given Ingress.
+
+### k8s.io.api.coordination/v1/`Lease`
+
+- A lightweight resource used for leader election or heartbeat-style state updates.
+
+### k8s.io.api.autoscaling/v2/`HorizontalPodAutoscaler`
+
+- A resource that automatically increases or decreases the number of Pods based on CPU or metrics.
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: my-service
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: my-service
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+```
+
+### autoscaling.k8s.io/v1/`VerticalPodAutoscaler`
+
+- Not created by the Istio Helm chart.
+- A resource that automatically recommends or updates Pod CPU and memory requests based on observed usage.
+- Usually provided by the VPA add-on, not built into every Kubernetes cluster by default.
+- Useful for right-sizing workloads rather than changing replica count.
+
+```yaml
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: my-service
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: my-service
+  updatePolicy:
+    updateMode: Auto # Off, Initial, Recreate, Auto
+  resourcePolicy:
+    containerPolicies:
+      - containerName: app
+        minAllowed:
+          cpu: 100m
+          memory: 128Mi
+        maxAllowed:
+          cpu: "2"
+          memory: 2Gi
+```
+
+### k8s.io.api.core/v1/`ResourceQuota`
+
+- A namespace-scoped resource that limits aggregate resource usage in a namespace.
+- Can cap total CPU, memory, storage, object counts, and other quota-tracked resources.
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: namespace-quota
+  namespace: default
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    pods: "20"
+    services: "10"
+```
+
+### k8s.io.api.core/v1/`LimitRange`
+
+- Not created by the Istio Helm chart.
+- A namespace-scoped resource that sets default, minimum, and maximum CPU/memory requests and limits for objects.
+- Often used together with ResourceQuota so Pods have default requests/limits when users do not specify them.
+
+```yaml
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-limits
+  namespace: default
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 500m
+        memory: 512Mi
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      max:
+        cpu: "2"
+        memory: 2Gi
+      min:
+        cpu: 50m
+        memory: 64Mi
+```
+
+### k8s.io.api.policy/v1/`PodDisruptionBudget`
+
+- Guarantees a minimum number of available Pods when Pods are disrupted, such as during node maintenance.
+
+## Gateway API Resources
+
+### gateway.networking.k8s.io/v1/`GatewayClass`
+
+- Defines the "class" resource that determines which controller, or implementation, manages Gateways.
+- The controller runs as a Deployment. Example: `istio: ingressgateway`.
+- Cluster-scoped.
+
+> GatewayClass
+> -> Istio gateway controller detects it
+> -> Gateway resource creation is processed
+> -> The actual ingressgateway, Envoy, is configured
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: istio
+spec:
+  controllerName: istio.io/gateway-controller
+```
+
+### gateway.networking.k8s.io/v1/`Gateway`
+
+- A resource that defines network entry points, or Listeners, that receive external or internal traffic.
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: my-gateway
+  namespace: default
+spec:
+  gatewayClassName: istio
+
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      hostname: "*.example.com"
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: "example.com"
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: tls-secret
+```
+
+### gateway.networking.k8s.io/v1/`HTTPRoute`
+
+- A routing resource that defines which Service receives HTTP requests entering through a Gateway.
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: my-route
+  namespace: default
+spec:
+  parentRefs: # Gateway definition
+    - name: my-gateway
+
+  hostnames:
+    - example.com
+
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api
+      backendRefs:
+        - name: my-service # Service
+          port: 80
+```
+
+### gateway.networking.k8s.io/v1/`GRPCRoute`
+
+- A Gateway API resource that routes gRPC requests to a specific backend based on service or method.
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata:
+  name: grpc-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: my-gateway
+
+  hostnames:
+    - api.example.com
+
+  rules:
+    - matches:
+        - method:
+            service: helloworld.Greeter
+            method: SayHello
+      backendRefs:
+        - name: grpc-service # Service
+          port: 50051
+```
+
+### gateway.networking.k8s.io/v1/`TCPRoute`
+
+- A simple L4 routing resource that forwards TCP connections to a specific backend Service.
+- Examples: MySQL, Redis, Kafka, and so on.
+- TLS is handled by the Gateway listener.
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: TCPRoute
+metadata:
+  name: tcp-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: my-gateway
+  rules:
+    - backendRefs:
+        - name: my-tcp-service
+          port: 3306
+# No matching based on HTTP Host headers
+---
+# Gateway configuration
+listeners:
+  - name: mysql
+    port: 3306
+    protocol: TCP
+```
+
+### gateway.networking.k8s.io/v1/`UDPRoute`
+
+- An L4 routing resource that forwards UDP packets to a specific backend Service.
+- Functionality is very limited.
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: UDPRoute
+metadata:
+  name: udp-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: my-gateway
+
+  rules:
+    - backendRefs:
+        - name: dns-service
+          port: 53
+---
+# Gateway configuration
+listeners:
+  - name: udp
+    port: 53
+    protocol: UDP
+```
+
+### gateway.networking.k8s.io/v1/`TLSRoute`
+
+- An L4.5 routing resource that forwards traffic to a specific backend based on SNI, or Server Name Indication, in the TLS handshake.
+- It reads SNI inside the TLS handshake, which enables hostname-based routing.
+- Required when end-to-end TLS is maintained and TLS is handled by the backend.
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: TLSRoute
+metadata:
+  name: tls-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: my-gateway
+
+  hostnames:
+    - example.com
+    - api.example.com
+  rules:
+    - backendRefs:
+        - name: my-service
+          port: 443
+```
+
+### inference.networking.x-k8s.io/v1alpha1/`InferencePool`
+
+- A resource that groups model inference workloads across multiple instances and handles traffic distribution, scaling, and optimization.
+- An intelligent routing and scaling layer above Service.
+- Appears in systems such as KServe, ModelMesh, and AI Gateway. Needs additional verification.
+
+```yaml
+apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: InferencePool
+metadata:
+  name: my-model
+  namespace: default
+spec:
+  targetRef:
+    group: ""
+    kind: Service
+    name: model-service
+
+  replicas:
+    min: 1
+    max: 10
+  loadBalancing:
+    policy: LeastRequest
+
+  model:
+    name: gpt-model
+```
+
+### gateway.networking.k8s.io/v1/`ReferenceGrant`
+
+- A resource that explicitly allows resources in another namespace to be referenced.
+
+> Compared with Istio Sidecar:
+>
+> - ReferenceGrant: allows who can reference what. Security for resource references.
+> - Istio Sidecar: limits which traffic is visible or allowed. Scope control for service communication.
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: ReferenceGrant
+metadata:
+  name: allow-http-route
+  namespace: other-ns # Namespace where the protected resource exists
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute # Subject that can access the resource
+      namespace: default
+
+  to:
+    - group: ""
+      kind: Service # Allowed resource
+```
+
+### gateway.networking.x-k8s.io/v1alpha1/`XBackendTrafficPolicy`
+
+- A Gateway API extension resource that defines policies for traffic going to a backend, such as a Service: retries, timeouts, load balancing, and so on.
+- Similar to `DestinationRule` `trafficPolicy`.
+- Not a standard resource. Support differs by implementation.
+
+```yaml
+apiVersion: gateway.networking.x-k8s.io/v1alpha1
+kind: XBackendTrafficPolicy
+metadata:
+  name: my-policy
+  namespace: default
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: my-service
+
+  loadBalancing:
+    policy: LeastRequest
+  retry:
+    attempts: 3
+    perTryTimeout: 2s
+
+  timeout: 5s
+```
+
+### gateway.networking.k8s.io/v1alpha2/`BackendTLSPolicy`
+
+- A policy resource that defines TLS settings for communication from a Gateway or proxy to a backend Service.
+- Similar to `DestinationRule` `trafficPolicy.tls`.
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: BackendTLSPolicy
+metadata:
+  name: backend-tls
+  namespace: default
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: my-service
+  tls:
+    mode: Simple
+    caCertRefs:
+      - name: ca-cert
+    sni: my-service.default.svc.cluster.local
+```
+
+### gateway.networking.x-k8s.io/v1alpha1/`ListenerSet`
+
+- A resource that allows multiple Listeners to be added to or extended from outside a single Gateway.
+- Can conflict with Gateway configuration.
+- Experimental.
+
+```yaml
+apiVersion: gateway.networking.x-k8s.io/v1alpha1
+kind: ListenerSet
+metadata:
+  name: extra-listeners
+  namespace: default
+spec:
+  parentRefs:
+    - name: my-gateway
+
+  listeners: # Same structure as Gateway listeners
+    - name: http-alt
+      port: 8080
+      protocol: HTTP
+    - name: https-alt
+      port: 8443
+      protocol: HTTPS
+```
+
+## Istio Resources
+
+### networking.istio.io/v1/`VirtualService`
+
+- An Istio routing rule resource that decides where traffic entering a service should go and under which conditions.
+- Splits traffic based on URL, headers, ratios, and other criteria.
+- Controls L7 routing in front of a Service, such as path/header-based routing and traffic splitting.
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: my-service
+spec:
+  hosts:
+    - my-service # Address that receives requests, for example a domain
+  http:
+    - route:
+        - destination:
+            host: my-service # Target address to send traffic to
+            port:
+              number: 80
+```
+
+### networking.istio.io/v1/`DestinationRule`
+
+- An Istio resource that defines how traffic should be sent.
+- Configures traffic policies, load balancing methods, connection/retry/TLS settings, and subsets such as versions.
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: my-service
+spec:
+  host: my-service
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 10
+      http:
+        http1MaxPendingRequests: 100
+    tls:
+      mode: ISTIO_MUTUAL
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 10s
+      baseEjectionTime: 30s
+```
+
+### networking.istio.io/v1/`Gateway`
+
+- An Istio resource that defines the entry point where external traffic enters the cluster.
+- Defines L4/L6 settings for incoming external requests: which ports, protocols, and domains are accepted.
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: my-gateway
+  namespace: istio-system
+spec:
+  selector: # Has this label
+    istio: ingressgateway # Selects which Pod, Envoy, handles the Gateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "myapp.example.com"
+```
+
+### networking.istio.io/v1/`ServiceEntry`
+
+- A resource that allows Istio to recognize services outside the cluster, or unregistered internal services, and control their traffic.
+- Used for external API call control, egress control, and managing external services through Istio features such as retries, timeouts, and circuit breakers.
+- Sometimes a `VirtualService` is attached to control routing to external services.
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: external-google
+spec:
+  hosts:
+    - www.google.com
+
+  location: MESH_EXTERNAL
+  ports:
+    - number: 443
+      name: https
+      protocol: HTTPS
+
+  resolution: DNS
+  # DNS: DNS lookup
+  # STATIC: Specify IP directly
+  # NONE: Passthrough without DNS
+```
+
+### networking.istio.io/v1/`WorkloadEntry`
+
+- A resource for including workloads outside the Kubernetes cluster, such as VMs or bare metal servers, in an Istio service.
+- A Service connection is required.
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: WorkloadEntry
+metadata:
+  name: vm-1
+  namespace: default
+spec:
+  address: 10.0.0.10 # VM or external server IP
+
+  labels: # Matched with the Service selector
+    app: my-service
+    version: v1
+
+  ports:
+    http: 8080
+
+  serviceAccount: default # Used for mTLS and authentication
+# Service
+#    -> selector
+# Pod (K8s)
+# WorkloadEntry (VM)
+#    ->
+# Grouped under the same service
+```
+
+### networking.istio.io/v1/`WorkloadGroup`
+
+- A resource that defines common settings for multiple WorkloadEntry resources, such as VMs, like a template.
+- Common settings are defined and then automatically applied to WorkloadEntry resources.
+
+```bash
+# When this command is run inside the VM, it combines local identity information
+# and generates a WorkloadEntry.
+istioctl x workload entry configure \
+  --workloadGroup my-service \
+  --namespace default
+```
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: WorkloadGroup
+metadata:
+  name: my-service
+  namespace: default
+spec:
+  metadata:
+    labels:
+      app: my-service
+      version: v1
+
+  template:
+    serviceAccount: default
+    ports:
+      http: 8080
+
+  probe:
+    httpGet:
+      path: /health
+      port: 8080
+```
+
+### networking.istio.io/v1/`EnvoyFilter`
+
+- A resource that directly modifies or extends the Envoy configuration generated by Istio. This is low-level customization.
+- Used for special header handling, inserting custom filters, and changing Envoy behavior.
+
+```yaml
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: add-header
+spec:
+  workloadSelector:
+    labels:
+      app: my-app
+  configPatches:
+    - applyTo: HTTP_FILTER # NETWORK_FILTER, CLUSTER, LISTENER
+      match:
+        context: SIDECAR_OUTBOUND # SIDECAR_OUTBOUND, GATEWAY
+      patch:
+        operation: INSERT_BEFORE # ADD, MERGE, REPLACE, REMOVE
+        value:
+          name: envoy.filters.http.lua
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+            inlineCode: |
+              function envoy_on_request(request_handle)
+                request_handle:headers():add("x-custom-header", "test")
+              end
+```
+
+### networking.istio.io/v1/`Sidecar`
+
+- An Istio resource that limits the scope of traffic and service information visible to an Envoy proxy.
+- Used for performance optimization, by reducing Envoy config size, and security, by blocking access to specific namespaces.
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: default
+  namespace: my-namespace
+spec:
+  egress:
+    - hosts:
+        - "./*"
+        - "istio-system/*"
+```
+
+### networking.istio.io/v1/`ProxyConfig`
+
+- An Istio resource that configures default Envoy proxy behavior globally or per workload.
+- Modifies Envoy defaults.
+- Changes Envoy bootstrap settings, log levels, tracing/metrics settings, connection settings, and proxy behavior tuning.
+
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: ProxyConfig
+metadata:
+  name: default
+  namespace: istio-system
+spec:
+  concurrency: 2
+
+  environmentVariables:
+    ISTIO_META_DNS_CAPTURE: "true"
+
+  tracing:
+    sampling: 100
+  image:
+    imageType: distroless
+```
+
+> Compared with EnvoyFilter:
+>
+> - `ProxyConfig`: configures Envoy's default behavior, such as bootstrap/runtime options, thread count, and log level.
+> - `EnvoyFilter`: directly patches Envoy configuration, such as xDS listener, route, and filter configuration.
+
+### `MeshConfig`
+
+> Configuration that sets global behavior for the entire Istio service mesh.
+>
+> - Not a Kubernetes resource. It is an Istio installation setting, configured through `istioctl` or Helm.
+> - If `IstioOperator` is not used, `MeshConfig` is managed through Helm values or istiod configuration such as ConfigMaps and arguments.
+
+### `MeshNetworks`
+
+- Configuration that defines connectivity information between different networks in Istio, such as clusters or VPCs.
+- Usually defined inside `meshConfig`.
+
+```yaml
+meshNetworks:
+  network1:
+    endpoints:
+      - fromRegistry: cluster1
+    gateways:
+      - address: 1.2.3.4
+        port: 15443
+  network2:
+    endpoints:
+      - fromRegistry: cluster2
+    gateways:
+      - address: 5.6.7.8
+        port: 15443
+```
+
+### security.istio.io/v1/`AuthorizationPolicy`
+
+- An Istio resource that controls whether requests are allowed or denied.
+- Defines access control based on who (`source`), what (`operation`), and where (`destination`).
+- `DENY` is evaluated first, then `ALLOW`.
+- `ALLOW` with no rules allows nothing.
+- `DENY` with `rules: {}` blocks all requests.
+
+```yaml
+# Allow the frontend to send GET requests to specific backend endpoints
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-frontend
+  namespace: default
+spec:
+  action: ALLOW # DENY, CUSTOM, AUDIT
+  selector:
+    matchLabels:
+      app: backend
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/default/sa/frontend"]
+      to: # Backend target
+        - operation:
+            methods: ["GET"]
+            paths: ["/api/v1/*"]
+            ports: ["8080"]
+```
+
+### security.istio.io/v1/`RequestAuthentication`
+
+- An Istio authentication resource that validates JWTs included in requests and passes the result to Envoy.
+- Validates JWT tokens, checks issuer and signature, extracts claims, and sends the result to Envoy.
+
+```yaml
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: jwt-auth
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: backend
+  fromHeaders: # Authorization by default
+    - name: x-jwt-token
+  fromParams:
+    - access_token
+  jwtRules:
+    - issuer: "https://accounts.google.com"
+      jwksUri: "https://www.googleapis.com/oauth2/v3/certs"
+```
+
+### security.istio.io/v1/`PeerAuthentication`
+
+- An Istio resource that defines whether service-to-service communication should use mTLS, or mutual TLS.
+
+> Used with DestinationRule:
+>
+> - PeerAuthentication: the server is ready to receive mTLS.
+> - DestinationRule: the client decides whether to send with mTLS.
+> - Even without a DestinationRule, Istio automatically generates TLS settings for mesh-internal communication through istiod. This can also be configured with `meshConfig.enableAutoMtls`.
+> - Communication issues can occur when calls come from workloads without sidecars or from traffic outside the mesh.
+> - Auto mTLS can still apply to gateway-to-server communication even when the gateway is outside the mesh.
+
+```yaml
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: default
+spec:
+  mtls:
+    mode: STRICT # PERMISSIVE, DISABLE
+```
+
+### telemetry.istio.io/v1/`Telemetry`
+
+- An Istio resource that controls Envoy observability: metrics, logs, and tracing.
+- Controls how Envoy emits observability data, such as Prometheus metrics, access logs, and distributed tracing with Jaeger or Zipkin.
+
+```yaml
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: metrics-config
+spec:
+  metrics:
+    - providers:
+        - name: prometheus
+      overrides:
+        - match:
+            metric: REQUEST_COUNT
+          disabled: false
+---
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: access-logs
+spec:
+  accessLogging:
+    - providers:
+        - name: envoy
+---
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: tracing-config
+spec:
+  tracing:
+    - providers:
+        - name: zipkin
+      randomSamplingPercentage: 100
+```
+
+### extensions.istio.io/v1alpha1/`WasmPlugin`
+
+- A resource that loads WebAssembly modules into Envoy to extend traffic processing logic.
+- Useful for safe extensions, code-based customization, and reusable plugins.
+
+```yaml
+apiVersion: extensions.istio.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: my-wasm-plugin
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: my-app
+
+  url: oci://ghcr.io/istio-ecosystem/wasm-plugins/my-plugin:latest # Wasm module location
+
+  phase: AUTHN # AUTHZ, STATS
+
+  pluginConfig:
+    key: value
+```

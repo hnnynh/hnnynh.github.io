@@ -9,6 +9,7 @@ import BlogEntry from "$components/BlogEntry.astro";
 import Pagination from "$components/Pagination.astro";
 import ProseWrapper from "./ProseWrapper.astro";
 import BigBlogEntry from "$components/BigBlogEntry.astro";
+import PostSidebar from "$components/PostSidebar.astro";
 
 type Props = {
   posts: Array<any>;
@@ -16,38 +17,56 @@ type Props = {
   currentPage: number;
   tag?: string;
   showFeatured?: boolean;
+  sidebarPosts?: Array<any>;
 };
 
-const { posts, totalPages, currentPage, tag, showFeatured } = Astro.props;
+const { posts, totalPages, currentPage, tag, showFeatured, sidebarPosts } =
+  Astro.props;
 ---
 
 <BaseLayout title={SITE_TITLE} description={SITE_DESCRIPTION}>
   <Header active="blog" />
-  <main class="max-w-2xl lg:max-w-3xl mx-auto mt-8 px-4">
-    <ProseWrapper class="pb-8">
-      <slot />
-    </ProseWrapper>
-
-    {
-      showFeatured ? (
-        <BigBlogEntry {...posts[0].data} slug={posts[0].id} />
-      ) : null
-    }
-    <div class="my-14 space-y-16 max-w-3xl">
+  <main class="w-full mt-4 px-4 sm:px-6 lg:px-8">
+    <div
+      class:list={[
+        sidebarPosts?.length
+          ? "lg:grid lg:grid-cols-[14rem_minmax(0,1fr)] lg:gap-8 xl:grid-cols-[15rem_minmax(0,1fr)]"
+          : "max-w-2xl lg:max-w-3xl mx-auto",
+      ]}
+    >
       {
-        posts.map((post: any, index: number) =>
-          index > 0 || !showFeatured ? (
-            <BlogEntry {...post.data} slug={post.id} />
-          ) : null
-        )
+        sidebarPosts?.length ? (
+          <PostSidebar posts={sidebarPosts} />
+        ) : null
       }
-    </div>
 
-    {
-      totalPages > 1 ? (
-        <Pagination current={currentPage} total={totalPages} {tag} />
-      ) : null
-    }
+      <div class="max-w-3xl">
+        <ProseWrapper class="pb-4">
+          <slot />
+        </ProseWrapper>
+
+        {
+          showFeatured && posts[0] ? (
+            <BigBlogEntry {...posts[0].data} slug={posts[0].id} />
+          ) : null
+        }
+        <div class="my-10 space-y-12 max-w-3xl">
+          {
+            posts.map((post: any, index: number) =>
+              index > 0 || !showFeatured ? (
+                <BlogEntry {...post.data} slug={post.id} />
+              ) : null
+            )
+          }
+        </div>
+
+        {
+          totalPages > 1 ? (
+            <Pagination current={currentPage} total={totalPages} {tag} />
+          ) : null
+        }
+      </div>
+    </div>
   </main>
 
   <Footer />

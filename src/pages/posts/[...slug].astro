@@ -9,6 +9,9 @@ import FormattedDate from "$components/FormattedDate.astro";
 import { getBlogPosts } from "src/utils";
 import Tag from "$components/Tag.astro";
 import { SHOW_IMAGES } from "../../config.ts";
+import PostSidebar from "$components/PostSidebar.astro";
+import PostToc from "$components/PostToc.astro";
+import ApplauseButton from "$components/ApplauseButton.astro";
 
 export async function getStaticPaths() {
   const posts = await getBlogPosts(true);
@@ -20,7 +23,9 @@ export async function getStaticPaths() {
 type Props = CollectionEntry<"blog">;
 
 const post = Astro.props;
-const { Content } = await render(post);
+const { Content, headings } = await render(post);
+const posts = await getBlogPosts();
+const postUrl = new URL(Astro.url.pathname, Astro.site).toString();
 
 const images = import.meta.glob<{ default: ImageMetadata }>(
   "/src/assets/**/*.{jpeg,jpg,png,gif}"
@@ -35,32 +40,45 @@ if (replacedHero && !images[replacedHero])
 <BaseLayout {...post.data} image={post.id + ".png"}>
   <Header active="blog" />
 
-  <main class="max-w-2xl lg:max-w-3xl mx-auto my-0 h-full p-4">
-    {
-      replacedHero && post.data.hideHero !== true && SHOW_IMAGES ? (
-        <Image
-          src={images[replacedHero]()}
-          alt=""
-          class="w-full h-80 object-cover rounded-xl shadow border border-base-400 dark:border-base-700"
-        />
-      ) : null
-    }
-    <BlogPost>
-      <div
-        class="flex mt-8 gap-4 text-xs flex-col md:flex-row items-start md:items-center"
-      >
-        <div class="shrink-0">
-          <FormattedDate date={post.data.pubDate} />
-        </div>
-        <div class="flex gap-2 flex-wrap">
-          {post.data.tags?.map((tag: string) => <Tag {tag} />)}
-        </div>
-      </div>
+  <main class="w-full mt-4 px-4 sm:px-6 lg:px-8">
+    <div
+      class="lg:grid lg:grid-cols-[14rem_minmax(0,1fr)] lg:gap-8 xl:grid-cols-[15rem_minmax(0,1fr)_14rem]"
+    >
+      <PostSidebar {posts} />
 
-      <h1 class="mt-4">{post.data.title}</h1>
-      <Content />
+      <article class="max-w-3xl">
+        {
+          replacedHero && post.data.hideHero !== true && SHOW_IMAGES ? (
+            <Image
+              src={images[replacedHero]()}
+              alt=""
+              class="w-full h-80 object-cover rounded-xl shadow border border-base-400 dark:border-base-700"
+            />
+          ) : null
+        }
+        <BlogPost>
+          <div
+            class="flex mt-4 gap-4 text-xs flex-col md:flex-row items-start md:items-center"
+          >
+            <div class="shrink-0">
+              <FormattedDate date={post.data.pubDate} />
+            </div>
+            <div class="flex gap-2 flex-wrap">
+              {post.data.tags?.map((tag: string) => <Tag {tag} />)}
+            </div>
+          </div>
 
-    </BlogPost>
+          <div class="mt-4 flex items-start gap-3">
+            <h1 class="m-0 min-w-0 flex-1">{post.data.title}</h1>
+            <ApplauseButton url={postUrl} />
+          </div>
+          <Content />
+
+        </BlogPost>
+      </article>
+
+      <PostToc {headings} />
+    </div>
   </main>
   <Footer />
 </BaseLayout>

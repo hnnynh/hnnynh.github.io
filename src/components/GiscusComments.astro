@@ -1,0 +1,51 @@
+---
+import { GISCUS } from "../config.ts";
+
+const isConfigured =
+  GISCUS.enabled &&
+  GISCUS.repo.length > 0 &&
+  GISCUS.repoId.length > 0 &&
+  GISCUS.category.length > 0 &&
+  GISCUS.categoryId.length > 0;
+---
+
+{
+  isConfigured ? (
+    <section
+      class="giscus-reactions mt-12 border-t border-base-200 pt-8 dark:border-base-800"
+    >
+      <h2 class="mb-4 text-xl font-semibold text-base-900 dark:text-base-50">
+        Reactions
+      </h2>
+      <script
+        is:inline
+        src="https://giscus.app/client.js"
+        data-repo={GISCUS.repo}
+        data-repo-id={GISCUS.repoId}
+        data-category={GISCUS.category}
+        data-category-id={GISCUS.categoryId}
+        data-mapping={GISCUS.mapping}
+        data-strict={GISCUS.strict}
+        data-reactions-enabled={GISCUS.reactionsEnabled}
+        data-emit-metadata={GISCUS.emitMetadata}
+        data-input-position={GISCUS.inputPosition}
+        data-theme={GISCUS.theme}
+        data-lang={GISCUS.lang}
+        data-loading="lazy"
+        crossorigin="anonymous"
+        async
+      />
+    </section>
+  ) : null
+}
+
+<style>
+  .giscus-reactions :global(.giscus) {
+    max-height: 9rem;
+    overflow: hidden;
+  }
+
+  .giscus-reactions :global(.giscus-frame) {
+    max-height: 9rem;
+  }
+</style>

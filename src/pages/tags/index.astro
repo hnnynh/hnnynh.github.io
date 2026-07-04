@@ -1,0 +1,49 @@
+---
+import { BASE, SITE_DESCRIPTION, SITE_TITLE } from "../../config.ts";
+import Header from "$components/Header.astro";
+import Footer from "$components/Footer.astro";
+import BaseLayout from "$layouts/BaseLayout.astro";
+import ProseWrapper from "$layouts/ProseWrapper.astro";
+import { getBlogPosts } from "src/utils";
+
+const posts = await getBlogPosts();
+const tagCounts = new Map<string, number>();
+
+posts.forEach((post: any) => {
+  post.data.tags?.forEach((tag: string) => {
+    tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+  });
+});
+
+const tags = Array.from(tagCounts).sort(([a], [b]) => a.localeCompare(b));
+---
+
+<BaseLayout title={`Tags | ${SITE_TITLE}`} description={SITE_DESCRIPTION}>
+  <Header active="blog" />
+  <main class="w-full mt-4 px-4 sm:px-6 lg:px-8">
+    <div class="max-w-3xl">
+      <ProseWrapper class="pb-4">
+        <h1>Tags</h1>
+      </ProseWrapper>
+
+      <ul class="mt-6 flex flex-wrap gap-3">
+        {
+          tags.map(([tag, count]) => (
+            <li>
+              <a
+                href={BASE + "/tags/" + tag.split(" ").join("-")}
+                class="inline-flex items-center gap-2 rounded-full border border-base-300 bg-base-100 px-4 py-2 text-sm font-medium text-base-800 hover:border-base-400 hover:bg-base-200 dark:border-base-700 dark:bg-base-900 dark:text-base-200 dark:hover:border-base-600 dark:hover:bg-base-800"
+              >
+                <span>{tag}</span>
+                <span class="text-xs text-base-500 dark:text-base-400">
+                  {count}
+                </span>
+              </a>
+            </li>
+          ))
+        }
+      </ul>
+    </div>
+  </main>
+  <Footer />
+</BaseLayout>

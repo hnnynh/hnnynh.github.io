@@ -1,0 +1,52 @@
+---
+interface Props {
+  url: string;
+}
+
+const { url } = Astro.props;
+---
+
+<link
+  rel="stylesheet"
+  href="https://unpkg.com/applause-button/dist/applause-button.css"
+/>
+<script
+  is:inline
+  src="https://unpkg.com/applause-button/dist/applause-button.js"
+></script>
+
+<applause-button class="post-applause" color="#d8a7b1" url={url} />
+
+<style is:global>
+  .post-applause {
+    display: inline-block;
+    width: 2.75rem;
+    height: 2.75rem;
+    flex: 0 0 auto;
+    color: #d8a7b1;
+  }
+
+  .post-applause .style-root {
+    --main-color: #d8a7b1;
+  }
+
+  .post-applause .shockwave {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .post-applause .shockwave::after {
+    content: "♥";
+    font-size: 1.1rem;
+    line-height: 1;
+  }
+
+  .post-applause svg {
+    display: none;
+  }
+
+  .post-applause .clap-count {
+    font-size: 0.75rem;
+  }
+</style>
