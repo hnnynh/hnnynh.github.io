@@ -1,0 +1,808 @@
+---
+title: "Inside Istio's Service Registry"
+description: "How istiod collects Kubernetes Services and ServiceEntries, resolves hostname conflicts, and turns an ext_authz provider into an Envoy outbound cluster."
+pubDate: "Aug 21 2026"
+published: true
+category: "Istio"
+tags: ["Istio", "Kubernetes"]
+---
+
+Istio needs the following information to route traffic:
+
+- Available services
+- Service hostnames and addresses
+- Ports and protocols
+- Backend endpoints
+- Service visibility for each proxy
+
+This information is stored in the internal service registry.
+
+```text
+Kubernetes resources ─┐
+                      ├─> Service registry
+Istio resources ──────┘
+                              │
+                              ▼
+                     Proxy-specific scope
+                              │
+                              ▼
+                      xDS configuration
+                  (CDS, EDS, LDS, RDS, ...)
+                              │
+                              ▼
+                  Envoy clusters + endpoints
+```
+
+Focus of this post:
+
+- Kubernetes Service and ServiceEntry registry models
+- Service visibility and hostname conflicts
+- <code>ExternalName</code> versus <code>MESH_EXTERNAL</code>
+- Registry service → Envoy <code>ext_authz</code> cluster
+
+> Implementation references use [Istio 1.28.2](https://github.com/istio/istio/releases/tag/1.28.2). Internal fields and debug endpoints are not stable APIs.
+
+## What the Service Registry Contains
+
+- Kubernetes provider
+  - Sources: <code>Service</code>, <code>Pod</code>, <code>EndpointSlice</code>
+  - Internal provider name: <code>Kubernetes</code>
+- External provider
+  - Sources: <code>ServiceEntry</code>, <code>WorkloadEntry</code>
+  - Internal provider name: <code>External</code>
+
+<code>External</code> identifies the registry provider:
+
+- It does not automatically mean the service is outside the mesh.
+- A ServiceEntry can use:
+  - <code>MESH_EXTERNAL</code>
+  - <code>MESH_INTERNAL</code>
+
+The registry provides the source data used to generate:
+
+- CDS
+  - Envoy clusters
+- EDS
+  - Cluster endpoints
+- LDS/RDS
+  - Listeners and routes that reference those services
+
+References:
+
+- [Istio service registry glossary](https://istio.io/latest/docs/reference/glossary/)
+- [ServiceEntry reference](https://istio.io/latest/docs/reference/config/networking/service-entry/)
+
+## Inspecting the Registry
+
+### CLI
+
+```bash
+istioctl x internal-debug registryz > registryz.json
+```
+
+### Debug dashboard
+
+```bash
+istioctl dashboard istiod-debug deployment/istiod -n istio-system
+```
+
+- Open <code>registryz</code> in the dashboard.
+- List endpoints supported by the installed version:
+
+```bash
+istioctl x internal-debug list
+```
+
+Common internal endpoints:
+
+- <code>registryz</code>
+- <code>clusterz</code>
+- <code>endpointz</code>
+- <code>edsz</code>
+- <code>configz</code>
+- <code>push_status</code>
+- <code>syncz</code>
+
+Security note:
+
+- Internal endpoints can expose:
+  - Service names
+  - IP addresses
+  - Labels
+  - Control-plane configuration
+- Do not expose them publicly.
+
+Implementation:
+
+- [<code>registryz</code>](https://github.com/istio/istio/blob/1.28.2/pilot/pkg/xds/debug.go#L320-L325)
+  - Serializes <code>ServiceDiscovery.Services()</code>.
+
+## Reading Registry Entries
+
+### Kubernetes Service
+
+Shortened example:
+
+```jsonc
+{
+  "Attributes": {
+    "ServiceRegistry": "Kubernetes",
+    "Name": "test-server",
+    "Namespace": "test",
+    "LabelSelectors": {
+      "app": "test-server",
+    },
+    "Type": "ClusterIP",
+    "ExternalName": "",
+    "NodeLocal": false,
+    "TrafficDistribution": 1,
+    "PublishNotReadyAddresses": false,
+  },
+  "ports": [
+    {
+      "name": "http",
+      "port": 8080,
+      "protocol": "HTTP",
+    },
+    {
+      "name": "metrics",
+      "port": 8081,
+      "protocol": "UnsupportedProtocol",
+    },
+  ],
+  "hostname": "test-server.test.svc.cluster.local",
+  "clusterVIPs": {
+    "Addresses": {
+      "Kubernetes": ["192.0.2.10"],
+    },
+  },
+  "defaultAddress": "192.0.2.10",
+  "Resolution": 0,
+  "MeshExternal": false,
+}
+```
+
+Common fields:
+
+- <code>ServiceRegistry</code>- Registry provider
+- <code>Name</code>, <code>Namespace</code>- Originating resource identity
+- <code>hostname</code>- Canonical hostname used by Istio
+- <code>ports</code>- Ports and protocols understood by Istio
+- <code>clusterVIPs</code>- Per-cluster virtual IPs
+- <code>defaultAddress</code>- Primary service address
+- <code>Resolution</code>- Endpoint resolution strategy
+- <code>MeshExternal</code>- Whether the model represents an external service
+
+Kubernetes-specific fields:
+
+- <code>LabelSelectors</code>- Workload selector from the Service
+- <code>ClusterExternalAddresses</code>- Per-cluster external addresses
+- <code>ClusterExternalPorts</code>- Service-port-to-NodePort mappings
+- <code>PassthroughTargetPorts</code>- Target-port translation for passthrough
+  services
+- <code>NodeLocal</code>- <code>internalTrafficPolicy: Local</code>
+- <code>TrafficDistribution</code>- Kubernetes traffic-distribution preference
+- <code>PublishNotReadyAddresses</code>- Whether not-ready endpoints are
+  published
+
+Istio 1.28.2 enum examples:
+
+- <code>Resolution: 0</code>- <code>ClientSideLB</code>- Envoy selects an
+  endpoint from its local pool.
+- <code>TrafficDistribution: 1</code>- <code>PreferSameZone</code>
+
+Definitions: [<code>pilot/pkg/model/service.go</code>](https://github.com/istio/istio/blob/1.28.2/pilot/pkg/model/service.go#L178-L194)
+
+<code>UnsupportedProtocol</code>:
+
+- Does not mean the port is unusable.
+- Istio could not infer a supported application protocol.
+- Traffic is generally treated as opaque TCP.
+- Use a conventional port name or <code>appProtocol</code> to make it explicit.
+
+### ServiceEntry
+
+Shortened example:
+
+```jsonc
+{
+  "Attributes": {
+    "ServiceRegistry": "External",
+    "Name": "api.github.com",
+    "Namespace": "test",
+    "ExportTo": {
+      "test": {},
+    },
+    "ObjectName": "github-api",
+  },
+  "ports": [
+    {
+      "name": "https",
+      "port": 443,
+      "protocol": "HTTPS",
+    },
+  ],
+  "hostname": "api.github.com",
+  "clusterVIPs": {
+    "Addresses": null,
+  },
+  "defaultAddress": "0.0.0.0",
+  "Resolution": 2,
+  "MeshExternal": true,
+}
+```
+
+Important fields:
+
+- <code>Namespace</code>- Namespace containing the ServiceEntry
+- <code>ObjectName</code>- ServiceEntry resource name
+- <code>Name</code>, <code>hostname</code>- Modeled service identity
+- <code>ExportTo</code>- Namespaces allowed to import the service - Default:
+  visible to all namespaces
+- <code>MeshExternal: true</code>- Corresponds to
+  <code>location: MESH_EXTERNAL</code>
+- <code>Resolution: 2</code>- <code>Passthrough</code> in this example - Depends
+  on the ServiceEntry configuration
+
+<code>clusterVIPs.Addresses: null</code>:
+
+- Means no frontend virtual IP was configured.
+- Does not mean the service has no endpoints.
+- Addresses
+  - Frontend IPs matched by Envoy
+- Endpoints
+  - Backends selected by Envoy
+
+## Visibility and Hostname Conflicts
+
+The registry is global, but each proxy receives a scoped view.
+
+### Visibility Controls
+
+- <code>exportTo</code>- Service owner controls which namespaces can see the
+  service.
+- <code>Sidecar.spec.egress.hosts</code>- Workload owner controls which visible
+  services a sidecar imports.
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: frontend-egress
+  namespace: frontend
+spec:
+  egress:
+    - hosts:
+        - "backend/*"
+        - "./*"
+        - "security/*"
+  outboundTrafficPolicy:
+    mode: ALLOW_ANY
+  workloadSelector:
+    labels:
+      app: frontend-api
+```
+
+Imported services:
+
+- <code>backend/*</code>- Services from <code>backend</code>
+- <code>./*</code>- Services in <code>frontend</code>
+- <code>security/*</code>- Services from <code>security</code>
+
+<code>ALLOW_ANY</code>:
+
+- Controls unknown outbound destinations.
+- Does not restore registered services omitted by <code>egress.hosts</code>.
+- A filter referencing a named cluster still requires that cluster in CDS.
+
+### Namespace Selection
+
+When the same hostname exists in multiple imported namespaces, [<code>selectServices</code>](https://github.com/istio/istio/blob/1.28.2/pilot/pkg/model/sidecar.go#L678-L735) chooses one namespace.
+
+Priority with unified sidecar scoping:
+
+1. Proxy configuration namespace
+2. Kubernetes provider when all candidates are in other namespaces
+3. First service encountered when otherwise equivalent
+
+<code>First encountered</code>:
+
+- Means the internal visible-service order.
+- Does not mean YAML order.
+- Must not be used as a stable ownership rule.
+
+Simplified logic:
+
+```go
+for _, svc := range importedServices {
+    current := namespaceProvider{
+        Namespace: svc.Attributes.Namespace,
+        KubernetesService: svc.Attributes.ServiceRegistry == Kubernetes,
+    }
+
+    selected, found := validServices[svc.Hostname]
+
+    switch {
+    case !found:
+        validServices[svc.Hostname] = current
+    case current.Namespace == configNamespace:
+        validServices[svc.Hostname] = current
+    case !selected.KubernetesService &&
+         current.KubernetesService &&
+         selected.Namespace != configNamespace:
+        validServices[svc.Hostname] = current
+    }
+}
+```
+
+### Provider Selection and Port Merging
+
+The selected namespace can still contain multiple models for one hostname.
+
+[<code>appendSidecarServices</code>](https://github.com/istio/istio/blob/1.28.2/pilot/pkg/model/sidecar.go#L885-L955) applies:
+
+1. Kubernetes service over non-Kubernetes service
+2. Existing first-added model when otherwise equivalent
+3. Port merging when the models are compatible
+
+### Combined Sidecar Priority
+
+1. Choose one namespace per hostname.
+   1. Proxy namespace
+   2. Kubernetes provider for other namespaces
+   3. First namespace encountered when otherwise equivalent
+2. Resolve providers inside that namespace.
+   1. Kubernetes over <code>External</code>
+   2. First-added model when otherwise equivalent
+   3. Merge compatible ports
+
+The final tie can be influenced by:
+
+- [Creation time](https://github.com/istio/istio/blob/1.28.2/pilot/pkg/model/push_context.go#L1523-L1527)
+- [<code>exportTo</code> visibility buckets](https://github.com/istio/istio/blob/1.28.2/pilot/pkg/model/push_context.go#L1033-L1054)
+
+Sidecar selection priority is not registry registration priority.
+
+## ExternalName or <code>MESH_EXTERNAL</code>?
+
+### Kubernetes ExternalName
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: github-api
+  namespace: app
+spec:
+  type: ExternalName
+  externalName: api.github.com
+  ports:
+    - name: https
+      port: 443
+      protocol: TCP
+```
+
+- Kubernetes DNS
+  - <code>github-api.app.svc.cluster.local</code> returns
+    <code>api.github.com</code> as its CNAME target.
+- Istio registry
+  - Provider: <code>Kubernetes</code>
+  - Resolution: <code>Alias</code>
+  - ClusterIP: none
+- Istio model
+  - Additional frontend name for a concrete service
+  - Not an independent backend
+- Good fit
+  - DNS-level location transparency
+  - Keep a Kubernetes-local name for an external implementation
+- Important limitation
+  - The concrete target should already be known to Istio for reliable HTTP/TLS alias routing.
+  - See [ExternalName traffic routing](https://istio.io/latest/docs/ops/configuration/traffic-management/traffic-routing/#externalname-services).
+
+### ServiceEntry with <code>MESH_EXTERNAL</code>
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: github-api
+  namespace: app
+spec:
+  hosts:
+    - api.github.com
+  location: MESH_EXTERNAL
+  resolution: DNS
+  ports:
+    - number: 443
+      name: https
+      protocol: TLS
+```
+
+- Explicitly registers <code>api.github.com</code>.
+- Creates an independent Istio service/backend.
+- Can receive:
+  - Dedicated Envoy cluster
+  - VirtualService policy
+  - DestinationRule policy
+
+| Resource                                               | Primary purpose              | Istio model                           |
+| ------------------------------------------------------ | ---------------------------- | ------------------------------------- |
+| Kubernetes <code>ExternalName</code>                   | Kubernetes-local alias       | Alias/frontend for a concrete service |
+| <code>ServiceEntry</code> + <code>MESH_EXTERNAL</code> | Register an external backend | Independent service/backend           |
+
+## How Services Enter the Registry
+
+### Kubernetes Service
+
+1. Watch resources.
+   - Service
+   - Namespace
+   - Node
+   - Pod
+   - EndpointSlice
+
+```go
+c.services = kclient.NewFiltered[*v1.Service](client, filter)
+registerHandlers(c, c.services, "Services", c.onServiceEvent, nil)
+```
+
+2. Convert the Service.
+
+```go
+svcConv := kube.ConvertService(
+    *curr,
+    c.opts.DomainSuffix,
+    c.Cluster(),
+    c.meshWatcher.Mesh(),
+)
+```
+
+3. Update the controller cache.
+
+```go
+c.servicesMap[currConv.Hostname] = currConv
+```
+
+4. Report the service event.
+
+```go
+c.opts.XDSUpdater.SvcUpdate(
+    shard,
+    string(currConv.Hostname),
+    namespace,
+    event,
+)
+```
+
+Source:
+
+- Kubernetes registry [<code>controller.go</code>](https://github.com/istio/istio/blob/1.28.2/pilot/pkg/serviceregistry/kube/controller/controller.go#L513-L539)
+- Kubernetes registry [<code>conversion.go</code>](https://github.com/istio/istio/blob/1.28.2/pilot/pkg/serviceregistry/kube/conversion.go#L46)
+
+### ServiceEntry
+
+1. Register configuration handlers.
+
+```go
+configController.RegisterEventHandler(
+    gvk.ServiceEntry,
+    s.serviceEntryHandler,
+)
+configController.RegisterEventHandler(
+    gvk.WorkloadEntry,
+    s.workloadEntryHandler,
+)
+```
+
+2. Convert the ServiceEntry.
+
+```go
+convertedServices := convertServices(currentConfig)
+```
+
+3. Update service and instance indexes.
+
+```go
+s.services.updateServices(key, convertedServices)
+s.serviceInstances.updateServiceEntryInstances(
+    key,
+    serviceInstancesByConfig,
+)
+```
+
+4. Report the service event.
+
+```go
+s.XdsUpdater.SvcUpdate(
+    shard,
+    string(service.Hostname),
+    service.Attributes.Namespace,
+    model.EventAdd,
+)
+```
+
+Source:
+
+- ServiceEntry registry [event registration](https://github.com/istio/istio/blob/1.28.2/pilot/pkg/serviceregistry/serviceentry/controller.go#L150-L161)
+- ServiceEntry registry [update handler](https://github.com/istio/istio/blob/1.28.2/pilot/pkg/serviceregistry/serviceentry/controller.go#L384-L454)
+
+## Aggregating Registries
+
+Example controllers:
+
+- One Kubernetes registry controller per cluster
+- One ServiceEntry registry controller
+
+Aggregate behavior:
+
+- Kubernetes services
+  - Same hostname across clusters → one multicluster model
+  - Per-cluster VIPs are merged.
+- Non-Kubernetes services
+  - Appended without Kubernetes multicluster hostname merging.
+
+```go
+for _, registry := range registries {
+    services := registry.Services()
+
+    if registry.Provider() != Kubernetes {
+        result = append(result, services...)
+        continue
+    }
+
+    for _, service := range services {
+        if firstKubernetesServiceWithHostname(service.Hostname) {
+            result = append(result, service)
+        } else {
+            mergeClusterVIPs(existingService, service)
+        }
+    }
+}
+```
+
+Source:
+
+- Aggregate [<code>Services()</code>](https://github.com/istio/istio/blob/1.28.2/pilot/pkg/serviceregistry/aggregate/controller.go#L308-L347)
+- Aggregate [<code>Run()</code>](https://github.com/istio/istio/blob/1.28.2/pilot/pkg/serviceregistry/aggregate/controller.go#L460-L476)
+
+## Registry Service to <code>ext_authz</code> Cluster
+
+Provider configuration:
+
+```yaml
+meshConfig:
+  extensionProviders:
+    - name: external-authz
+      envoyExtAuthzGrpc:
+        service: ext-authz.security.svc.cluster.local
+        port: 8085
+```
+
+An <code>AuthorizationPolicy</code> with <code>action: CUSTOM</code> adds an Envoy <code>ext_authz</code> filter.
+
+Generated cluster reference:
+
+```json
+{
+  "envoy_grpc": {
+    "cluster_name": "outbound|8085||ext-authz.security.svc.cluster.local",
+    "authority": "ext-authz.security.svc.cluster.local"
+  }
+}
+```
+
+Key point:
+
+- The filter directly references an Envoy cluster.
+- RDS is not used to select the authorization destination.
+
+### 1. Resolve the Provider
+
+- [<code>processExtensionProvider</code>](https://github.com/istio/istio/blob/1.28.2/pilot/pkg/security/authz/builder/extauthz.go#L61-L99)
+  - Validates the provider.
+  - Dispatches gRPC providers to <code>buildExtAuthzGRPC</code>.
+
+### 2. Look Up the Service
+
+```go
+hostname, cluster, err := model.LookupCluster(
+    push,
+    config.Service,
+    port,
+)
+```
+
+[<code>LookupCluster</code>](https://github.com/istio/istio/blob/1.28.2/pilot/pkg/model/telemetry_logging.go#L591-L625):
+
+- Searches <code>push.ServiceIndex.HostnameAndNamespace</code>.
+- Supports:
+
+```text
+<hostname>
+<namespace>/<hostname>
+```
+
+- Namespace omitted
+  - Hostname must resolve to exactly one namespace.
+- Same hostname in multiple namespaces
+  - Use the namespace-qualified form.
+
+Cluster key:
+
+```go
+cluster = BuildSubsetKey(
+    TrafficDirectionOutbound,
+    "",             // no subset
+    service.Hostname,
+    port,
+)
+```
+
+Result:
+
+```text
+outbound|8085||ext-authz.security.svc.cluster.local
+```
+
+### 3. Configure the Filter
+
+- <code>generateGRPCConfig</code>- Writes the cluster name to
+  <code>envoy_grpc.cluster_name</code>. - Uses the service hostname as the gRPC
+  authority.
+- Envoy [<code>EnvoyGrpc</code>](https://www.envoyproxy.io/docs/envoy/latest/api-v3/config/core/v3/grpc_service.proto.html#envoy-v3-api-msg-config-core-v3-grpcservice-envoygrpc)
+  - Sends the authorization request through the named cluster.
+
+### 4. Ensure the Cluster Exists
+
+- Service lookup alone is insufficient.
+- The proxy must also receive the outbound cluster through CDS.
+- Default sidecar
+  - Imports all visible services.
+- Restrictive Sidecar
+  - <code>egress.hosts</code> must import the authorization service.
+- Gateway
+  - Services referenced by <code>MeshConfig.ExtensionProviders</code> are treated as required services.
+  - See [<code>extraServicesForProxy</code>](https://github.com/istio/istio/blob/1.28.2/pilot/pkg/model/push_context.go#L959-L1011).
+
+Verification:
+
+```bash
+# Filter references the expected cluster.
+istioctl proxy-config listener <pod> -n <namespace> -o json
+
+# CDS contains the outbound cluster.
+istioctl proxy-config cluster <pod> -n <namespace> \
+  --fqdn ext-authz.security.svc.cluster.local
+
+# EDS contains healthy endpoints.
+istioctl proxy-config endpoint <pod> -n <namespace> \
+  --cluster 'outbound|8085||ext-authz.security.svc.cluster.local'
+```
+
+## Does <code>ext_authz</code> Go Through the Mesh?
+
+Yes, in the configuration and data-plane sense:
+
+- Uses an Istio-generated outbound cluster.
+- Uses registry endpoints.
+- Can apply:
+  - Endpoint health
+  - Load balancing
+  - Locality behavior
+  - Connection-pool settings
+  - TLS settings
+  - DestinationRule policy
+
+It does not use the application outbound path:
+
+```text
+Application request
+└─> iptables
+    └─> outbound listener
+        └─> route
+            └─> upstream cluster
+```
+
+The authorization path is:
+
+```text
+Inbound request
+└─> Envoy ext_authz filter
+    └─> CheckRequest
+        └─> named outbound cluster
+            └─> authorization-service endpoint
+```
+
+Important differences:
+
+- Envoy creates the authorization call internally.
+- The call is not reinjected through iptables.
+- RDS is not required to choose the destination.
+- If the authorization workload has a sidecar:
+  - The connection still reaches its inbound data plane.
+  - Normal mTLS and inbound policy apply.
+
+Envoy sends a [<code>CheckRequest</code>](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter.html), which can include:
+
+- Peer identities and addresses
+- Destination information
+- HTTP method and path
+- Selected headers
+- Metadata
+- Optional request-body bytes
+
+It is not necessarily the complete original request.
+
+## Locality and Traffic Policy
+
+The provider uses normal Istio cluster-building behavior.
+
+Possible endpoint-selection inputs:
+
+- Registry endpoint locality
+- Kubernetes traffic-distribution hints
+- Mesh or DestinationRule <code>localityLbSetting</code>
+- Outlier detection and failover
+- Subset policy
+- TLS policy
+
+There is no separate <code>ext_authz</code> locality algorithm:
+
+- The filter selects a cluster.
+- The cluster selects an endpoint.
+
+Best debugging targets:
+
+- Generated cluster
+- Cluster endpoints
+- Applicable traffic policy
+
+## Debugging Checklist
+
+1. Registry
+   - Run <code>istioctl x internal-debug registryz</code>.
+   - Confirm hostname, namespace, port, provider, and resolution.
+2. Hostname ambiguity
+   - Use <code>&lt;namespace&gt;/&lt;hostname&gt;</code> when multiple namespaces contain the hostname.
+3. Visibility
+   - Confirm <code>exportTo</code>.
+4. Sidecar scope
+   - Confirm <code>Sidecar.egress.hosts</code>.
+5. CDS
+   - Confirm <code>outbound|&lt;port&gt;||&lt;hostname&gt;</code> exists.
+6. EDS
+   - Confirm healthy endpoints and expected locality.
+7. Filter
+   - Confirm <code>envoy_grpc.cluster_name</code> matches the CDS cluster.
+8. Policy and workload
+   - Check DestinationRule, mTLS, readiness, and fail-open/fail-closed behavior.
+
+## Takeaways
+
+- Service registry
+  - Bridge between platform discovery and Envoy configuration
+- Kubernetes and ServiceEntry controllers
+  - Build separate service models
+- Aggregate controller
+  - Combines registry views
+- Proxy scoping
+  - Decides which services each proxy receives
+- Hostname conflict priority
+  1. Proxy namespace
+  2. Kubernetes provider
+  3. First model encountered when otherwise equivalent
+- <code>ExternalName</code>- Primarily an alias
+- <code>ServiceEntry</code>- Explicit Istio service/backend
+- <code>envoyExtAuthzGrpc</code>- Resolves through the Service Index - Uses
+  <code>outbound|port||hostname</code>- Calls the named cluster directly from
+  the filter - Uses normal endpoints, locality, and traffic policy
+
+## References
+
+- [Istio traffic management concepts](https://istio.io/latest/docs/concepts/traffic-management/)
+- [Istio service registry glossary entry](https://istio.io/latest/docs/reference/glossary/)
+- [Istio ServiceEntry reference](https://istio.io/latest/docs/reference/config/networking/service-entry/)
+- [Understanding Istio traffic routing](https://istio.io/latest/docs/ops/configuration/traffic-management/traffic-routing/)
+- [Istio external authorization task](https://istio.io/latest/docs/tasks/security/authorization/authz-custom/)
+- [Envoy external authorization filter](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter.html)
+- [Exploring Istio's internal service registry](https://trstringer.com/get-istio-internal-service-registry/)

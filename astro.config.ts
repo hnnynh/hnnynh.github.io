@@ -1,27 +1,22 @@
 // @ts-check
 import { defineConfig } from "astro/config";
+import { unified } from "@astrojs/markdown-remark";
 import { resolve } from "path";
 import remarkMath from "remark-math";
 import rehypeMathjax from "rehype-mathjax";
 
 import mdx from "@astrojs/mdx";
 import sitemap from "@astrojs/sitemap";
-import tailwind from "@astrojs/tailwind";
 import svelte from "@astrojs/svelte";
+import tailwindcss from "@tailwindcss/vite";
 import { pagefind } from "vite-plugin-pagefind";
 
 import { BASE, SITE } from "./src/config.ts";
-
-import customEmbeds from "astro-custom-embeds";
 
 import {
   transformerMetaHighlight,
   transformerNotationHighlight,
 } from "@shikijs/transformers";
-
-import LinkCardEmbed from "./src/embeds/link-card/embed";
-import YoutubeEmbed from "./src/embeds/youtube/embed";
-import ExcalidrawEmbed from "./src/embeds/excalidraw/embed";
 
 // https://astro.build/config
 export default defineConfig({
@@ -38,7 +33,7 @@ export default defineConfig({
     ssr: {
       noExternal: [BASE + "/pagefind/pagefind.js"],
     },
-    plugins: [pagefind({ outputDirectory: "dist" })],
+    plugins: [tailwindcss(), pagefind({ outputDirectory: "dist" })],
     build: {
       rollupOptions: {
         external: [BASE + "/pagefind/pagefind.js"],
@@ -46,17 +41,13 @@ export default defineConfig({
     },
   },
 
-  integrations: [
-    customEmbeds({
-      embeds: [ExcalidrawEmbed, YoutubeEmbed, LinkCardEmbed],
-    }),
-    mdx(),
-    sitemap(),
-    tailwind(),
-    svelte(),
-  ],
+  integrations: [mdx(), sitemap(), svelte()],
 
   markdown: {
+    processor: unified({
+      remarkPlugins: [remarkMath],
+      rehypePlugins: [rehypeMathjax],
+    }),
     shikiConfig: {
       // Choose from Shiki's built-in themes (or add your own)
       // https://shiki.style/themes
@@ -73,9 +64,6 @@ export default defineConfig({
       ],
       wrap: true,
     },
-
-    remarkPlugins: [remarkMath],
-    rehypePlugins: [rehypeMathjax],
   },
 
   prefetch: {

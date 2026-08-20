@@ -1,0 +1,648 @@
+---
+title: "Argo Rollouts Canary Deployments and Istio xDS"
+description: "How Argo Rollouts changes Kubernetes and Istio resources, and how those changes affect Envoy xDS."
+pubDate: "Aug 21 2026"
+published: true
+category: "Istio"
+tags: ["Argo", "Istio", "Kubernetes"]
+---
+
+Argo Rollouts does not process application traffic itself.
+
+- Argo Rollouts
+  - Scales stable/canary ReplicaSets
+  - Changes <code>VirtualService</code> weights
+  - Changes Service selectors or DestinationRule subset labels
+- Istio
+  - Watches those resource changes
+  - Recalculates proxy configuration
+  - Sends the effective changes to Envoy through xDS
+
+```text
+Argo Rollouts
+├─ Pod scaling ───────────────> EndpointSlice ─> EDS
+├─ VirtualService weight ─────> RDS
+├─ Service selector ──────────> Full push + EDS
+└─ DestinationRule labels ────> Full push + EDS subset filtering
+```
+
+Assumptions:
+
+- Canary steps: <code>0% -> 50% -> 100%</code>
+- HTTP traffic splitting
+- Stable/canary identification: <code>rollouts-pod-template-hash</code>
+- Controller event order omitted
+  - Kubernetes watches are asynchronous.
+  - Istio may merge nearby events through debounce.
+- Istio source: commit [<code>ab413ac</code>](https://github.com/istio/istio/tree/ab413ac6c1f40b2f7c69d97e0db4e712e4ef1ecc)
+
+## Common Rollout Configuration
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: rollouts-demo
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: rollouts-demo
+  template:
+    metadata:
+      labels:
+        app: rollouts-demo
+    spec:
+      containers:
+        - name: rollouts-demo
+          image: example.com/rollouts-demo:v2
+          ports:
+            - name: http
+              containerPort: 8080
+  strategy:
+    canary:
+      steps:
+        - setWeight: 0
+        - pause: { duration: 1m }
+        - setWeight: 50
+        - pause: { duration: 10m }
+        - setWeight: 100
+```
+
+- <code>setWeight</code>- Controls the Istio route weight. - Does not directly
+  mean the same percentage of Pods.
+- Replica count
+  - Controls the capacity of each revision.
+  - Can be managed separately with <code>setCanaryScale</code>.
+
+## Host-level Traffic Splitting
+
+- Resources
+  - Rollout
+  - Stable Service
+  - Canary Service
+  - VirtualService
+- Revision selection
+  - Stable Service selector → stable ReplicaSet hash
+  - Canary Service selector → canary ReplicaSet hash
+- Traffic splitting
+  - VirtualService routes to two Service hostnames
+
+```text
+                       ┌─> stable Service ─> stable Pods
+client ─> Istio route ─┤
+                       └─> canary Service ─> canary Pods
+```
+
+### Configuration
+
+Add the following fields to the common Rollout:
+
+```yaml
+spec:
+  strategy:
+    canary:
+      stableService: rollouts-demo-stable
+      canaryService: rollouts-demo-canary
+      trafficRouting:
+        istio:
+          virtualService:
+            name: rollouts-demo
+            routes:
+              - primary
+```
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: rollouts-demo-stable
+spec:
+  selector:
+    app: rollouts-demo
+    # Injected by Rollouts:
+    # rollouts-pod-template-hash: <stable-hash>
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rollouts-demo-canary
+spec:
+  selector:
+    app: rollouts-demo
+    # Injected by Rollouts:
+    # rollouts-pod-template-hash: <canary-hash>
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: rollouts-demo
+spec:
+  hosts:
+    - rollouts-demo.example.com
+  gateways:
+    - rollouts-demo-gateway
+  http:
+    - name: primary
+      route:
+        - destination:
+            host: rollouts-demo-stable
+          weight: 100
+        - destination:
+            host: rollouts-demo-canary
+          weight: 0
+```
+
+[Official host-level configuration](https://argo-rollouts.readthedocs.io/en/stable/features/traffic-management/istio/#host-level-traffic-splitting)
+
+### Resource Changes by Deployment Phase
+
+#### Canary starts
+
+- Rollout
+  - Creates/scales the canary ReplicaSet.
+- Canary Service
+  - Selector changes to the canary hash.
+- EndpointSlice
+  - Canary endpoints change.
+
+#### Canary <code>0 -> 50</code>
+
+- Rollout
+  - Scales canary Pods.
+- EndpointSlice
+  - Endpoints change as Pods scale.
+- VirtualService
+  - Stable: <code>100 -> 50</code>
+  - Canary: <code>0 -> 50</code>
+
+#### Canary <code>50 -> 100</code>
+
+- Rollout
+  - Scales canary Pods.
+- EndpointSlice
+  - Endpoints change as Pods scale.
+- VirtualService
+  - Stable: <code>50 -> 0</code>
+  - Canary: <code>50 -> 100</code>
+
+#### Canary is promoted to stable
+
+- Stable Service
+  - Selector changes to the promoted hash.
+- VirtualService
+  - Stable: <code>0 -> 100</code>
+  - Canary: <code>100 -> 0</code>
+- Old stable ReplicaSet
+  - Scaled down after the configured delay.
+
+The final stable 100/canary 0 state is not a rollback:
+
+- The stable Service now selects the new revision.
+- The route is reset for the next rollout.
+
+## Subset-level Traffic Splitting
+
+- Resources
+  - Rollout
+  - One Service
+  - VirtualService
+  - DestinationRule with stable/canary subsets
+- Revision selection
+  - Stable subset labels → stable ReplicaSet hash
+  - Canary subset labels → canary ReplicaSet hash
+- Traffic splitting
+  - VirtualService routes to two subsets of the same host
+
+```text
+                       ┌─> stable subset ─> stable Pods
+client ─> Istio route ─┤
+                       └─> canary subset ─> canary Pods
+```
+
+### Configuration
+
+Add the following fields to the common Rollout:
+
+```yaml
+spec:
+  strategy:
+    canary:
+      trafficRouting:
+        istio:
+          virtualService:
+            name: rollouts-demo
+            routes:
+              - primary
+          destinationRule:
+            name: rollouts-demo
+            stableSubsetName: stable
+            canarySubsetName: canary
+```
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: rollouts-demo
+spec:
+  selector:
+    app: rollouts-demo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: rollouts-demo
+spec:
+  hosts:
+    - rollouts-demo.example.com
+  gateways:
+    - rollouts-demo-gateway
+  http:
+    - name: primary
+      route:
+        - destination:
+            host: rollouts-demo
+            subset: stable
+          weight: 100
+        - destination:
+            host: rollouts-demo
+            subset: canary
+          weight: 0
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: rollouts-demo
+spec:
+  host: rollouts-demo
+  subsets:
+    - name: stable
+      labels:
+        app: rollouts-demo
+        # Injected by Rollouts:
+        # rollouts-pod-template-hash: <stable-hash>
+    - name: canary
+      labels:
+        app: rollouts-demo
+        # Injected by Rollouts:
+        # rollouts-pod-template-hash: <canary-hash>
+```
+
+[Official subset-level configuration](https://argo-rollouts.readthedocs.io/en/stable/features/traffic-management/istio/#subset-level-traffic-splitting)
+
+### Resource Changes by Deployment Phase
+
+#### Canary starts
+
+- Rollout
+  - Creates/scales the canary ReplicaSet.
+- DestinationRule
+  - Canary subset label changes to the canary hash.
+- EndpointSlice
+  - The shared Service gains canary endpoints.
+
+#### Canary <code>0 -> 50</code>
+
+- Rollout
+  - Scales canary Pods.
+- EndpointSlice
+  - Shared Service endpoints change.
+- VirtualService
+  - Stable: <code>100 -> 50</code>
+  - Canary: <code>0 -> 50</code>
+
+#### Canary <code>50 -> 100</code>
+
+- Rollout
+  - Scales canary Pods.
+- EndpointSlice
+  - Shared Service endpoints change.
+- VirtualService
+  - Stable: <code>50 -> 0</code>
+  - Canary: <code>50 -> 100</code>
+
+#### Canary is promoted to stable
+
+- DestinationRule
+  - Stable subset label changes to the promoted hash.
+- VirtualService
+  - Stable: <code>0 -> 100</code>
+  - Canary: <code>100 -> 0</code>
+- Old stable ReplicaSet
+  - Scaled down after the configured delay.
+
+### Additional Subsets
+
+- Examples
+  - <code>legacy</code>
+  - <code>experiment</code>
+- Behavior
+  - The additional subset keeps its configured weight.
+  - Its weight is subtracted from the stable share.
+- Example
+  - Additional: 20
+  - <code>setWeight: 50</code>
+  - Stable: 30
+  - Canary: 50
+- Constraint
+  - Avoid <code>canary + additional > 100</code>.
+
+## xDS Impact by Resource Change
+
+### 1. EndpointSlice Changes from Pod Scaling
+
+- Trigger
+  - ReplicaSet scaling
+  - Pod readiness/removal
+- Istio flow
+
+```text
+EndpointSlice watch
+-> convert endpoints to IstioEndpoint
+-> update EndpointIndex
+-> EDS push debounce
+-> build the affected ClusterLoadAssignment
+-> send EDS
+```
+
+- Push type
+  - Normally <code>IncrementalPush</code>
+  - Does not rebuild the global <code>PushContext</code>
+- Main xDS change
+  - EDS
+- Full-push exceptions
+  - New service
+  - Service account change
+  - Headless-service listener change
+  - Network topology change
+- Propagation scope
+  - Proxies subscribing to the affected service/subset cluster
+  - Restricted by the effective Sidecar scope
+
+[<code>EndpointIndex.UpdateServiceEndpoints</code>](https://pkg.go.dev/istio.io/istio/pilot/pkg/model#EndpointIndex.UpdateServiceEndpoints) returns <code>NoPush</code>, <code>IncrementalPush</code>, or <code>FullPush</code>.
+
+### 2. VirtualService Weight Changes
+
+- Trigger
+  - Argo Rollouts <code>setWeight</code>
+- Istio flow
+
+```text
+VirtualService watch
+-> Full PushRequest
+-> debounce
+-> rebuild VirtualService index
+-> select affected proxies
+-> regenerate proxy configuration
+-> send effective changes
+```
+
+- Main xDS change
+  - RDS <code>weighted_clusters.weight</code>
+
+```yaml
+weighted_clusters:
+  clusters:
+    - name: outbound|80||rollouts-demo-stable.default.svc.cluster.local
+      weight: 50
+    - name: outbound|80||rollouts-demo-canary.default.svc.cluster.local
+      weight: 50
+  total_weight: 100
+```
+
+- Other xDS resources
+  - LDS
+    - May be regenerated.
+    - Usually unchanged.
+  - CDS
+    - May be regenerated.
+    - Usually unchanged.
+  - EDS
+    - Not affected by a weight-only change.
+    - <code>VirtualService</code> is in [<code>skippedEdsConfigs</code>
+      ](https://github.com/istio/istio/blob/ab413ac6c1f40b2f7c69d97e0db4e712e4ef1ecc/pilot/pkg/xds/eds.go#L69-L80).
+- Propagation scope
+  - Gateway route
+    - Selected gateway proxies
+  - <code>mesh</code> route - VirtualService <code>exportTo</code> scope -
+    Sidecars importing the configuration and services - Proxies for which the
+    route is relevant
+
+### 3. Host-level Service Selector Changes
+
+- Trigger
+  - Stable/canary hash change
+- Important detail
+  - The selector itself is not sent to Envoy.
+  - Istio stores it in <code>ServiceAttributes.LabelSelectors</code>.
+
+```go
+Attributes: model.ServiceAttributes{
+    ServiceRegistry: provider.Kubernetes,
+    Name:            svc.Name,
+    Namespace:       svc.Namespace,
+    Labels:          svc.Labels,
+    ExportTo:        exportTo,
+    LabelSelectors:  svc.Spec.Selector,
+}
+```
+
+- Service-model flow
+
+```text
+Kubernetes Service watch
+-> ConvertService
+-> detect LabelSelectors change
+-> Full PushRequest for the service hostname
+-> rebuild PushContext and proxy scopes
+-> regenerate relevant xDS resources
+```
+
+- Endpoint flow
+
+```text
+Service selector change
+-> Kubernetes EndpointSlice reconciliation
+-> EndpointIndex update
+-> EDS
+```
+
+- Push behavior
+  - Service and EndpointSlice events are independent.
+  - They may be merged in one debounce window.
+  - A Service update uses a <code>kind.ServiceEntry</code> config key in this xDS path.
+  - EDS can therefore be restricted by <code>canSendPartialFullPushes</code>.
+- Effective xDS changes
+  - EDS
+    - Endpoints change after EndpointSlice reconciliation.
+  - RDS/LDS/CDS
+    - Recalculated during the full push.
+    - Usually unchanged when hostname, VIP, and ports stay the same.
+
+[<code>ServiceAttributes.Equals</code>](https://github.com/istio/istio/blob/ab413ac6c1f40b2f7c69d97e0db4e712e4ef1ecc/pilot/pkg/model/service.go#L868-L886) compares <code>LabelSelectors</code>.
+
+### 4. Subset-level DestinationRule Label Changes
+
+- Trigger
+  - Stable/canary subset hash change
+- Istio flow
+
+```text
+DestinationRule watch
+-> Full PushRequest
+-> rebuild DestinationRule index
+-> select affected proxies using current/previous Sidecar scopes
+-> regenerate subset clusters
+-> compare subset labels with IstioEndpoint.Labels
+-> build subset ClusterLoadAssignments
+-> send effective changes
+```
+
+- Effective xDS changes
+  - EDS
+    - Endpoints move between stable/canary subset clusters.
+  - CDS
+    - Recalculated.
+    - Usually unchanged for a labels-only edit.
+  - RDS
+    - Recalculated.
+    - Usually unchanged when host, subset names, and weights stay the same.
+- Push behavior
+  - <code>DestinationRule</code> is not in <code>skippedEdsConfigs</code>.
+  - <code>canSendPartialFullPushes</code> returns false.
+  - State-of-the-world EDS may rebuild subscribed resources for each affected proxy.
+  - Cache hits and resource comparison can reduce actual work or transmission.
+- Propagation scope
+  - Proxies whose current or previous Sidecar scope depends on the DestinationRule
+
+## Full, Incremental, and Partial Full Pushes
+
+```go
+// Can EDS inside a full push be restricted to changed services?
+func canSendPartialFullPushes(req *model.PushRequest) bool {
+    if req.Forced {
+        return false
+    }
+    for cfg := range req.ConfigsUpdated {
+        if skippedEdsConfigs.Contains(cfg.Kind) {
+            continue
+        }
+        if cfg.Kind != kind.ServiceEntry {
+            return false
+        }
+    }
+    return true
+}
+```
+
+Source: [<code>pilot/pkg/xds/eds.go</code>](https://github.com/istio/istio/blob/ab413ac6c1f40b2f7c69d97e0db4e712e4ef1ecc/pilot/pkg/xds/eds.go#L117-L136)
+
+### Full Push
+
+- Rebuilds the <code>PushContext</code>.
+- Recalculates proxy-specific configuration.
+- Does not mean every xDS resource is transmitted.
+  - Unaffected proxies can be filtered.
+  - Cached resources can be reused.
+  - Unchanged output can be skipped.
+
+### Incremental Push
+
+- Normally used for endpoint-only changes.
+- Does not rebuild the <code>PushContext</code>.
+- Generates EDS for the changed service.
+
+### Partial Full EDS
+
+- Not a separate top-level push type.
+- EDS optimization inside a full push.
+- Rebuilds the <code>PushContext</code>.
+- Restricts CLA generation to changed services when possible.
+
+### Delta xDS
+
+- Full/incremental
+  - Decides what Istio recomputes.
+- <code>DELTA_GRPC</code>- Decides how resources are delivered.
+- Behavior
+  - Sends changed resources.
+  - Sends deletions through <code>removed_resources</code>.
+  - A full push can produce a small wire diff.
+  - Full-push recomputation still occurs.
+
+## Comparison
+
+| Item                   | Host-level                    | Subset-level                                 |
+| ---------------------- | ----------------------------- | -------------------------------------------- |
+| Services               | Stable and canary Services    | One shared Service                           |
+| Hash mapping           | Service selectors             | DestinationRule subset labels                |
+| Envoy clusters         | Separate host clusters        | Separate subset clusters                     |
+| Canary start/promotion | Service full push + EDS       | DestinationRule full push + subset EDS       |
+| Partial full EDS       | Can apply                     | Does not apply to the DestinationRule update |
+| East-west traffic      | Two destination hostnames     | One service hostname                         |
+| Metrics                | Easier to separate by Service | Usually separated by subset/workload         |
+
+Common behavior during <code>0 -> 50 -> 100</code>:
+
+- Pod scaling
+  - EndpointSlice change
+  - EDS change
+- VirtualService weight change
+  - Full push
+  - Effective RDS change
+
+Main difference at canary start and promotion:
+
+- Host-level
+  - Changes a Service selector.
+- Subset-level
+  - Changes DestinationRule subset labels.
+
+## Inspection Commands
+
+```bash
+kubectl argo rollouts get rollout rollouts-demo --watch
+
+kubectl get service,endpointslice,virtualservice,destinationrule \
+  -n default --watch
+
+istioctl proxy-config routes <pod> -n <namespace>
+istioctl proxy-config clusters <pod> -n <namespace>
+istioctl proxy-config endpoints <pod> -n <namespace>
+istioctl proxy-status
+```
+
+- Routes
+  - Check stable/canary weights.
+- Clusters
+  - Check stable/canary hosts or subsets.
+- Endpoints
+  - Check the Pod IPs selected by each cluster.
+
+## Operational Notes
+
+- Traffic weights apply to matching requests, not Pod counts.
+- A 50/50 weight is statistical, not exact for every small request sample.
+- Long-lived HTTP/2, gRPC, or TCP connections may not rebalance immediately.
+- Only traffic passing through the Istio data plane follows the VirtualService.
+- Rollouts mutates live VirtualService weights and DestinationRule labels.
+  - GitOps tools should ignore or coordinate those controller-owned fields.
+- Do not rely on the event order of Service, EndpointSlice, VirtualService, and DestinationRule.
+
+Shortest mental model:
+
+- Route selection → VirtualService → RDS
+- Endpoint membership → EndpointSlice or DestinationRule subset labels → EDS

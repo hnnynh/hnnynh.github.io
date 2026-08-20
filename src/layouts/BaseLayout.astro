@@ -1,12 +1,29 @@
 ---
 import BaseHead from "../components/BaseHead.astro";
-const { title, description, image } = Astro.props;
+import "../styles/global.css";
+const {
+  title,
+  description,
+  image,
+  ogType,
+  publishedTime,
+  modifiedTime,
+  jsonLd,
+} = Astro.props;
 ---
 
 <!doctype html>
 <html lang="en" class="h-full antialiased">
   <head>
-    <BaseHead title={title} description={description} image={image} />
+    <BaseHead
+      title={title}
+      description={description}
+      image={image}
+      ogType={ogType}
+      publishedTime={publishedTime}
+      modifiedTime={modifiedTime}
+      jsonLd={jsonLd}
+    />
 
     <script is:inline>
       let dark = false;
@@ -25,6 +42,8 @@ const { title, description, image } = Astro.props;
     </script>
 
     <style is:global>
+      @reference "../styles/global.css";
+
       html.dark .astro-code,
       html.dark .astro-code span {
         color: var(--shiki-dark);
@@ -36,8 +55,8 @@ const { title, description, image } = Astro.props;
       }
 
       pre {
-        @apply overflow-hidden !important;
-        @apply border border-base-300 dark:border-base-700 bg-base-200/50 dark:bg-base-950/30 rounded-xl !important;
+        @apply overflow-hidden;
+        @apply border border-base-300 dark:border-base-700 bg-base-200/50 dark:bg-base-950/30 rounded-xl;
       }
 
       .line.highlighted {
@@ -72,7 +91,7 @@ const { title, description, image } = Astro.props;
   <body
     class="bg-base-100 dark:bg-base-950 flex mx-1 sm:mx-4 transition-all duration-150"
   >
-    <div class="max-w-7xl mx-auto my-1 sm:my-6 w-full">
+    <div class="max-w-[90rem] mx-auto my-1 sm:my-6 w-full">
       <div class="w-full">
         <slot />
       </div>

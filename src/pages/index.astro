@@ -1,8 +1,28 @@
 ---
 import { getBlogPosts } from "src/utils";
 import PostList from "$layouts/PostList.astro";
+import {
+  AUTHOR_NAME,
+  AUTHOR_URL,
+  SITE,
+  SITE_DESCRIPTION,
+  SITE_NAME,
+} from "../config.ts";
 
 const posts = await getBlogPosts();
+const websiteJsonLd = {
+  "@context": "https://schema.org",
+  "@type": "WebSite",
+  name: SITE_NAME,
+  url: SITE,
+  description: SITE_DESCRIPTION,
+  inLanguage: "en",
+  creator: {
+    "@type": "Person",
+    name: AUTHOR_NAME,
+    url: AUTHOR_URL,
+  },
+};
 ---
 
 <PostList
@@ -11,6 +31,7 @@ const posts = await getBlogPosts();
   currentPage={1}
   showFeatured
   sidebarPosts={posts}
+  jsonLd={websiteJsonLd}
 >
   <h1>Posts</h1>
 </PostList>

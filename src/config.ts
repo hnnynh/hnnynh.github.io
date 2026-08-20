@@ -4,7 +4,10 @@ export const SITE = "https://hnnynh.github.io";
 export const BASE = "";
 
 export const SITE_TITLE = "hnnynh";
-export const SITE_DESCRIPTION = "";
+export const SITE_DESCRIPTION =
+  "Practical notes on SRE, Kubernetes, Istio, and Cloud-Native engineering";
+export const AUTHOR_NAME = "Yoonho Hann";
+export const AUTHOR_URL = `${SITE}/about/`;
 export const NAME = "(c) hnnynh - LICENSE";
 export const LICENSE = "All right reserved";
 export const BASE_COLOR: BaseColor = "neutral";
@@ -29,7 +32,7 @@ export const SOCIAL_LINKS: {
 export const MANUAL_DARK_MODE = true;
 export const SEARCH_ENABLED = true;
 export const SHOW_IMAGES = true;
-export const SITE_NAME = "";
+export const SITE_NAME = "hnnynh";
 
 export const GISCUS = {
   enabled: true,

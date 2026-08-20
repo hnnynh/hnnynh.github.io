@@ -18,13 +18,25 @@ type Props = {
   tag?: string;
   showFeatured?: boolean;
   sidebarPosts?: Array<any>;
+  jsonLd?: Record<string, unknown>;
 };
 
-const { posts, totalPages, currentPage, tag, showFeatured, sidebarPosts } =
-  Astro.props;
+const {
+  posts,
+  totalPages,
+  currentPage,
+  tag,
+  showFeatured,
+  sidebarPosts,
+  jsonLd,
+} = Astro.props;
 ---
 
-<BaseLayout title={SITE_TITLE} description={SITE_DESCRIPTION}>
+<BaseLayout
+  title={SITE_TITLE}
+  description={SITE_DESCRIPTION}
+  jsonLd={jsonLd}
+>
   <Header active="blog" />
   <main class="w-full mt-4 px-4 sm:px-6 lg:px-8">
     <div

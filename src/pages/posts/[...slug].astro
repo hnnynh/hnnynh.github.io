@@ -8,7 +8,12 @@ import { Image } from "astro:assets";
 import FormattedDate from "$components/FormattedDate.astro";
 import { getBlogPosts } from "src/utils";
 import Tag from "$components/Tag.astro";
-import { SHOW_IMAGES } from "../../config.ts";
+import {
+  AUTHOR_NAME,
+  AUTHOR_URL,
+  SHOW_IMAGES,
+  SITE_NAME,
+} from "../../config.ts";
 import PostSidebar from "$components/PostSidebar.astro";
 import PostToc from "$components/PostToc.astro";
 import ApplauseButton from "$components/ApplauseButton.astro";
@@ -26,6 +31,29 @@ const post = Astro.props;
 const { Content, headings } = await render(post);
 const posts = await getBlogPosts();
 const postUrl = new URL(Astro.url.pathname, Astro.site).toString();
+const postImageUrl = new URL(`/open-graph/${post.id}.png`, Astro.site).toString();
+const blogPostingJsonLd = {
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  headline: post.data.title,
+  description: post.data.description,
+  url: postUrl,
+  mainEntityOfPage: {
+    "@type": "WebPage",
+    "@id": postUrl,
+  },
+  image: postImageUrl,
+  datePublished: post.data.pubDate.toISOString(),
+  ...(post.data.updatedDate && {
+    dateModified: post.data.updatedDate.toISOString(),
+  }),
+  author: {
+    "@type": "Person",
+    name: AUTHOR_NAME,
+    url: AUTHOR_URL,
+  },
+  ...(post.data.tags?.length && { keywords: post.data.tags.join(", ") }),
+};
 
 const images = import.meta.glob<{ default: ImageMetadata }>(
   "/src/assets/**/*.{jpeg,jpg,png,gif}"
@@ -37,7 +65,15 @@ if (replacedHero && !images[replacedHero])
   );
 ---
 
-<BaseLayout {...post.data} image={post.id + ".png"}>
+<BaseLayout
+  {...post.data}
+  title={`${post.data.title} | ${SITE_NAME}`}
+  image={post.id + ".png"}
+  ogType="article"
+  publishedTime={post.data.pubDate}
+  modifiedTime={post.data.updatedDate}
+  jsonLd={blogPostingJsonLd}
+>
   <Header active="blog" />
 
   <main class="w-full mt-4 px-4 sm:px-6 lg:px-8">
@@ -46,12 +82,12 @@ if (replacedHero && !images[replacedHero])
     >
       <PostSidebar {posts} />
 
-      <article class="max-w-3xl">
+      <article class="max-w-4xl">
         {
           replacedHero && post.data.hideHero !== true && SHOW_IMAGES ? (
             <Image
               src={images[replacedHero]()}
-              alt=""
+              alt={post.data.title}
               class="w-full h-80 object-cover rounded-xl shadow border border-base-400 dark:border-base-700"
             />
           ) : null
@@ -60,10 +96,22 @@ if (replacedHero && !images[replacedHero])
           <div
             class="flex mt-4 gap-4 text-xs flex-col md:flex-row items-start md:items-center"
           >
-            <div class="shrink-0">
-              <FormattedDate date={post.data.pubDate} />
+            <div class="shrink-0 inline-flex items-center gap-1.5">
+              <span>
+                Published <FormattedDate date={post.data.pubDate} />
+              </span>
+              {
+                post.data.updatedDate && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span>
+                      Updated <FormattedDate date={post.data.updatedDate} />
+                    </span>
+                  </>
+                )
+              }
             </div>
-            <div class="flex gap-2 flex-wrap">
+            <div class="flex gap-2 flex-wrap md:ml-auto md:justify-end">
               {post.data.tags?.map((tag: string) => <Tag {tag} />)}
             </div>
           </div>
