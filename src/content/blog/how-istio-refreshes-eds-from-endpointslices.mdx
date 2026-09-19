@@ -1,0 +1,306 @@
+---
+title: "How Istio Refreshes EDS from EndpointSlices"
+description: "Follow an EndpointSlice event through Istio's service registry, endpoint cache, EndpointIndex, and Envoy EDS update path."
+pubDate: "Sep 20 2026"
+published: true
+category: "Istio"
+tags: ["Istio", "Kubernetes", "Envoy", "xDS"]
+---
+
+> Sources: Istio 1.28.2 [`endpointslice.go`](https://github.com/istio/istio/blob/1.28.2/pilot/pkg/serviceregistry/kube/controller/endpointslice.go), [`eds.go`](https://github.com/istio/istio/blob/1.28.2/pilot/pkg/xds/eds.go), and [`discovery.go`](https://github.com/istio/istio/blob/1.28.2/pilot/pkg/xds/discovery.go); [Kubernetes EndpointSlices](https://kubernetes.io/docs/concepts/services-networking/endpoint-slices/). These implementation details and internal debug endpoints are not stable APIs.
+
+Endpoint Discovery Service (EDS) tells Envoy which endpoints belong to an outbound cluster. In an Istio mesh backed by Kubernetes, a Pod becoming ready, terminating, or receiving a new IP often becomes an EndpointSlice event. Istiod usually turns that event into an EDS update without rebuilding all routing configuration.
+
+```text
+EndpointSlice event
+  → endpointSliceCache
+  → []*IstioEndpoint
+  → EndpointIndex
+  → IncrementalPush
+  → ClusterLoadAssignment
+  → Envoy EDS
+```
+
+## The service registry is the starting point
+
+Istio's service registry manages services known to the mesh. For the Kubernetes provider, its controller watches these resources:
+
+- Services
+- Namespaces
+- Nodes
+- Pods
+- EndpointSlices
+
+The informer cache keeps the original Kubernetes objects. Istio converts the required data into its own model and updates in-memory indexes, which then trigger the appropriate xDS update.
+
+The following registry entry uses example resource names, labels, namespaces, and addresses. A Kubernetes Service becomes a model with its identity, selector, ports, address, and resolution mode:
+
+```jsonc
+{
+  "Attributes": {
+    "ServiceRegistry": "Kubernetes",
+    "Name": "example-api",
+    "Namespace": "example",
+    "LabelSelectors": {
+      "app": "example-api"
+    },
+    "Type": "ClusterIP",
+    "ExternalName": "",
+    "NodeLocal": false,
+    "TrafficDistribution": 1,
+    "PublishNotReadyAddresses": false
+  },
+  "ports": [
+    {
+      "name": "http",
+      "port": 3000,
+      "protocol": "HTTP"
+    },
+    {
+      "name": "metrics",
+      "port": 9999,
+      "protocol": "UnsupportedProtocol"
+    }
+  ],
+  "hostname": "example-api.example.svc.cluster.local",
+  "clusterVIPs": {
+    "Addresses": {
+      "Kubernetes": ["172.20.101.0"]
+    }
+  },
+  "defaultAddress": "172.20.101.0",
+  "Resolution": 0,
+  "MeshExternal": false
+}
+```
+
+`registryz` exposes a view of these internal service models:
+
+```bash
+istioctl x internal-debug registryz > registryz.json
+```
+
+## What each Kubernetes resource contributes
+
+Each resource watched by the Kubernetes registry supplies different information.
+
+| Resource | Registry contribution |
+| --- | --- |
+| Service | Service name, FQDN, VIP, selector, ports, and service-level settings |
+| Pod | Metadata for endpoints and workload instances |
+| Node | Node IPs and labels for NodePort and multicluster-network gateway handling |
+| Namespace | Namespace labels, including `topology.istio.io/network` on system namespaces such as `istio-system` |
+| EndpointSlice | Service endpoints used to build EDS |
+
+A Service model needs more than an endpoint list. Its selector and ports map Kubernetes endpoints to an Istio service hostname. Pod, Node, and Namespace metadata complete the endpoint model sent to Envoy.
+
+## EndpointSlice events create Istio endpoints
+
+The EndpointSlice controller registers an informer handler. On an add, update, or delete event, it updates a separate `endpointSliceCache`. This cache is specific to EDS and stores endpoints as `IstioEndpoint` objects alongside the raw Kubernetes objects kept by informer caches.
+
+An EndpointSlice is associated with its Service through `kubernetes.io/service-name`. Istio combines that Service name with the namespace to find the registry hostname, for example `example-api.example.svc.cluster.local`.
+
+```text
+EndpointSlice (example)
+  kubernetes.io/service-name: example-api
+  namespace: example
+                │
+                ▼
+Service registry hostname
+  example-api.example.svc.cluster.local
+```
+
+### Enriching an EndpointSlice endpoint with Pod data
+
+An EndpointSlice endpoint often has a `targetRef` that points to a Pod. Istio uses it to enrich the raw address and port with workload metadata.
+
+```text
+EndpointSlice.endpoint.targetRef
+  → Pod/example/example-api-abcde
+  → look up Pod/example/example-api-abcde in the Pod informer cache
+  → combine Pod labels, ServiceAccount, locality, TLS mode, and node information
+  → create an IstioEndpoint
+```
+
+If the referenced Pod has not reached the informer cache, Istio does not send a partially populated endpoint. It omits that address and schedules an endpoint resync for when the Pod arrives. This avoids an EDS update with missing ServiceAccount, label, locality, or TLS metadata when Kubernetes events arrive out of order.
+
+### What an `IstioEndpoint` carries
+
+`IstioEndpoint` combines the EndpointSlice address with data gathered from the Service, Pod, Node, and Namespace.
+
+| Field | Typical source | Purpose |
+| --- | --- | --- |
+| `Addresses` | `EndpointSlice.endpoints[].addresses` | Backend IP addresses |
+| `ServicePortName` | EndpointSlice port name, or Service port name | Selects the service port |
+| `EndpointPort` | EndpointSlice port | Backend port |
+| `Labels` | Pod labels, with workload labels as fallback | Subset selection and policy matching |
+| `ServiceAccount` | `Pod.spec.serviceAccountName` | Identity and authorization context |
+| `Network` | Pod, Node, Namespace topology labels, or mesh-network settings | Multinetwork routing |
+| `Locality` | Node topology labels | Locality-aware load balancing |
+| `TLSMode` | Pod metadata and sidecar-injection state | TLS transport selection |
+| `WorkloadName` | Pod owner reference or workload metadata | Workload identity |
+| `HealthStatus` | EndpointSlice conditions | Healthy, draining, terminating, or unhealthy state |
+| `DiscoverabilityPolicy` | Service visibility and `exportTo` settings | Whether a proxy can discover the endpoint |
+
+The Service's `publishNotReadyAddresses` setting can also change whether unhealthy endpoints are sent.
+
+### Endpoint health comes from EndpointSlice conditions
+
+Istio uses `ready`, `serving`, and `terminating` from `EndpointSlice.endpoints[].conditions` to calculate endpoint health.
+
+```yaml
+# Example EndpointSlice
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: example-api-abc12
+  namespace: example
+  labels:
+    kubernetes.io/service-name: example-api
+addressType: IPv4
+endpoints:
+  - addresses:
+      - 192.0.2.88
+    conditions:
+      ready: true
+      serving: true
+      terminating: false
+    hints:
+      forZones:
+        - name: ap-northeast-2a
+    targetRef:
+      kind: Pod
+      name: example-api-6cb95d96d-8q9d4
+      namespace: example
+ports:
+  - name: http
+    port: 3000
+```
+
+The health decision follows this order:
+
+1. `ready` is `nil` or `true`: the endpoint is healthy.
+2. `ready` is `false`, but the Service supports draining endpoints and `serving` and `terminating` allow it: the endpoint is draining.
+3. Otherwise, when the Service reports a terminating endpoint: the endpoint is terminating.
+4. Remaining endpoints are unhealthy.
+
+During rollout and connection draining, removing an endpoint from EDS too early can interrupt active traffic. Keeping it healthy too long can send new traffic to a shutting-down Pod.
+
+## From the endpoint cache to an EDS push
+
+The EndpointSlice cache stores endpoint lists per service hostname and slice. When `pushEDS` runs, it reads the endpoints for each affected hostname and calls `XDSUpdater.EDSUpdate`.
+
+```go
+func (s *DiscoveryServer) EDSUpdate(
+    shard model.ShardKey,
+    serviceName string,
+    namespace string,
+    istioEndpoints []*model.IstioEndpoint,
+) {
+    pushType := s.Env.EndpointIndex.UpdateServiceEndpoints(
+        shard, serviceName, namespace, istioEndpoints, true,
+    )
+    if pushType == model.IncrementalPush || pushType == model.FullPush {
+        s.ConfigUpdate(&model.PushRequest{
+            Full: pushType == model.FullPush,
+            ConfigsUpdated: sets.New(model.ConfigKey{
+                Kind: kind.ServiceEntry, Name: serviceName, Namespace: namespace,
+            }),
+            Reason: model.NewReasonStats(model.EndpointUpdate),
+        })
+    }
+}
+```
+
+`EndpointIndex` is the global, per-istiod endpoint structure. It keeps endpoint shards keyed by service and namespace. Istio converts endpoints when it receives the Kubernetes event, then generates EDS from that normalized model.
+
+```text
+EndpointIndex
+  service → namespace → shard → []*IstioEndpoint
+```
+
+`UpdateServiceEndpoints` decides whether the change needs no push, an incremental push, or a full push. An endpoint-only change normally produces an `IncrementalPush`. Creating a service or changing a condition that affects wider proxy configuration can require a full push instead.
+
+## Incremental and full pushes use different state
+
+Istiod's `Environment` gathers the state used for xDS generation. Two members are particularly relevant here:
+
+```go
+type Environment struct {
+    pushContext  *PushContext
+    EndpointIndex *EndpointIndex
+    Cache XdsCache
+}
+```
+
+`PushContext` is an in-memory, read-oriented snapshot that organizes mesh configuration for xDS generation. Its indexes cover services, VirtualServices, DestinationRules, Sidecars, gateways, authentication and authorization policies, telemetry, mesh configuration, and mesh networks.
+
+Each `istiod` Pod maintains its own `PushContext`. The control plane does not share this Go object between replicas. That design avoids distributed shared state and supports high availability, scaling, and failure isolation.
+
+### Incremental push
+
+For an endpoint-only change, Istiod can reuse the existing `PushContext`.
+
+```text
+PushRequest (Full: false)
+  → reuse global PushContext
+  → drop affected xDS cache entries
+  → enqueue the push for ADS connections
+  → filter proxies with ProxyNeedsPush
+  → generate EDS
+```
+
+The EDS path eventually calls `EdsGenerator.Generate`, `buildEndpoints`, and `BuildClusterLoadAssignment`.
+
+### Full push
+
+A full push rebuilds `PushContext` from the configuration snapshot, then recalculates proxy-specific configuration. It does not mean every xDS resource is always transmitted to every proxy: Istio can filter unaffected proxies, reuse cached resources, and omit unchanged output.
+
+Changes to mesh configuration, service definitions, VirtualServices, DestinationRules, and EnvoyFilters are common reasons for full-push work. An EndpointSlice change is usually narrower because it changes endpoint membership rather than route or policy configuration.
+
+## Building the ClusterLoadAssignment
+
+During EDS generation, Istio builds an Envoy `ClusterLoadAssignment` for the requesting proxy and outbound cluster.
+
+```text
+EndpointIndex shards
+  ① snapshot and flatten endpoint shards
+  ② filter by service port, subset, and IP
+  ③ apply proxy visibility and group by locality
+  ④ create ClusterLoadAssignment
+  ⑤ apply locality load-balancer priorities and weights
+```
+
+Each proxy can receive a different endpoint set after Istio applies `exportTo`, Sidecar egress scope, subset labels, endpoint health, locality, network topology, and load-balancing policy.
+
+## Debugging an EDS update
+
+Compare the Kubernetes objects with the endpoint data Istio and Envoy use.
+
+```bash
+# Watch the Kubernetes source of the endpoint change.
+kubectl get endpointslice -n <namespace> -l kubernetes.io/service-name=<service> --watch
+
+# Inspect endpoints Envoy received for a workload.
+istioctl proxy-config endpoints <pod> -n <namespace>
+
+# Inspect one outbound cluster.
+istioctl proxy-config endpoints <pod> -n <namespace> \
+  --cluster 'outbound|<port>||<service>.<namespace>.svc.cluster.local'
+
+# Inspect Istiod's endpoint shards. Internal debug endpoints vary by version.
+istioctl x internal-debug endpointShardz
+```
+
+When an endpoint is missing, check these in order:
+
+1. The EndpointSlice has the expected `kubernetes.io/service-name`, address, port, and readiness conditions.
+2. Its `targetRef` points to a Pod that exists in the Pod informer cache.
+3. The Service selector and FQDN map to the expected registry service.
+4. The endpoint matches the DestinationRule subset labels, if the cluster uses a subset.
+5. The proxy imports the service through `exportTo` and its Sidecar scope.
+6. `istioctl proxy-config endpoints` contains the expected cluster and endpoint.
+
+## Takeaway
+
+An EDS update begins with Kubernetes endpoint data. Istio enriches and filters it before Envoy sees it: EndpointSlice events update an EDS-specific cache, `EndpointIndex` selects the push type, and the EDS generator produces a proxy-specific `ClusterLoadAssignment`. An endpoint may therefore be present in Kubernetes but absent from one Envoy proxy because of service identity, Pod metadata, visibility, subsets, health, locality, or network policy.
