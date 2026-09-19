@@ -17,6 +17,7 @@ import {
 import PostSidebar from "$components/PostSidebar.astro";
 import PostToc from "$components/PostToc.astro";
 import ApplauseButton from "$components/ApplauseButton.astro";
+import PostViews from "$components/PostViews.astro";
 
 export async function getStaticPaths() {
   const posts = await getBlogPosts(true);
@@ -96,7 +97,7 @@ if (replacedHero && !images[replacedHero])
           <div
             class="flex mt-4 gap-4 text-xs flex-col md:flex-row items-start md:items-center"
           >
-            <div class="shrink-0 inline-flex items-center gap-1.5">
+            <div class="inline-flex flex-wrap items-center gap-1.5">
               <span>
                 Published <FormattedDate date={post.data.pubDate} />
               </span>
@@ -110,6 +111,7 @@ if (replacedHero && !images[replacedHero])
                   </>
                 )
               }
+              <PostViews postId={post.id} />
             </div>
             <div class="flex gap-2 flex-wrap md:ml-auto md:justify-end">
               {post.data.tags?.map((tag: string) => <Tag {tag} />)}

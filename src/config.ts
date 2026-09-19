@@ -34,6 +34,10 @@ export const SEARCH_ENABLED = true;
 export const SHOW_IMAGES = true;
 export const SITE_NAME = "hnnynh";
 
+export const GOATCOUNTER = {
+  siteUrl: "https://hnnynh.goatcounter.com",
+};
+
 export const GISCUS = {
   enabled: true,
   repo: "hnnynh/hnnynh.github.io",

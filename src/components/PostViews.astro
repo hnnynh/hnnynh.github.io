@@ -1,0 +1,90 @@
+---
+import { BASE, GOATCOUNTER, SITE } from "../config";
+
+interface Props {
+  postId: string;
+}
+
+const { postId } = Astro.props;
+const isConfigured = import.meta.env.PROD && GOATCOUNTER.siteUrl.trim() !== "";
+const counterOrigin = isConfigured ? new URL(GOATCOUNTER.siteUrl).origin : "";
+const path = `${BASE}/posts/${postId}/`;
+---
+
+{
+  isConfigured && (
+    <span
+      hidden
+      data-post-views
+      data-counter-origin={counterOrigin}
+      data-site-origin={new URL(SITE).origin}
+      data-path={path}
+      data-pagefind-ignore
+      title="Visits with repeat views in the same session excluded. Counts may take up to four hours to update."
+    >
+      <span class="inline-flex items-center gap-1.5">
+        <span aria-hidden="true">·</span>
+        <span>Views <span data-view-count /></span>
+      </span>
+    </span>
+  )
+}
+
+<script>
+  const counter = document.querySelector<HTMLElement>("[data-post-views]");
+
+  if (counter && window.location.origin === counter.dataset.siteOrigin) {
+    const element = counter;
+    const { counterOrigin, path } = element.dataset;
+
+    if (counterOrigin && path) {
+      const origin = counterOrigin;
+      const countPath = path;
+
+      async function showViews() {
+        try {
+          const response = await fetch(
+            `${origin}/counter/${encodeURIComponent(countPath)}.json`,
+            { credentials: "omit", signal: AbortSignal.timeout(5000) },
+          );
+          if (!response.ok) return;
+
+          const data: unknown = await response.json();
+          if (
+            !data ||
+            typeof data !== "object" ||
+            !("count" in data) ||
+            typeof data.count !== "string" ||
+            !/^\d+(?:,\d{3})*$/.test(data.count)
+          ) return;
+
+          const value = element.querySelector("[data-view-count]");
+          if (!value) return;
+          value.textContent = data.count;
+          element.hidden = false;
+        } catch {
+          // Unavailable or blocked counters should not interfere with reading.
+        }
+      }
+
+      function start() {
+        if (document.visibilityState !== "visible") return;
+        document.removeEventListener("visibilitychange", start);
+
+        const script = document.createElement("script");
+        script.async = true;
+        script.src = "https://gc.zgo.at/count.js";
+        script.dataset.goatcounter = `${origin}/count`;
+        script.dataset.goatcounterSettings = JSON.stringify({ path: countPath });
+        document.head.append(script);
+        void showViews();
+      }
+
+      if (document.visibilityState === "visible") {
+        start();
+      } else {
+        document.addEventListener("visibilitychange", start);
+      }
+    }
+  }
+</script>
