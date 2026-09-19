@@ -4,15 +4,18 @@ interface Props {
 }
 
 const { url } = Astro.props;
+const applauseAssetBase = "/vendor/applause-button";
 ---
 
 <link
   rel="stylesheet"
-  href="https://unpkg.com/applause-button/dist/applause-button.css"
+  href={`${applauseAssetBase}/applause-button.css`}
+  integrity="sha384-kwNWgXTxe+yV8n1kL+LTKug5OGw0eNNp58jyoaLf9mnZi5AkFShr/Qw7qZACWFUV"
 />
 <script
   is:inline
-  src="https://unpkg.com/applause-button/dist/applause-button.js"
+  src={`${applauseAssetBase}/applause-button.js`}
+  integrity="sha384-pZ9kL7Uf7MfDXwswB58pbHhOD6lIkuM3+XaBAtVUy4La+yY/oKpopaXPR2UTD3Ud"
 ></script>
 
 <applause-button class="post-applause" color="#d8a7b1" url={url} />

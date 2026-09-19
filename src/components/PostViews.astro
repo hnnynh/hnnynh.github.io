@@ -18,6 +18,7 @@ const path = `${BASE}/posts/${postId}/`;
       data-post-views
       data-counter-origin={counterOrigin}
       data-site-origin={new URL(SITE).origin}
+      data-asset-base={BASE}
       data-path={path}
       data-pagefind-ignore
       title="Visits with repeat views in the same session excluded. Counts may take up to four hours to update."
@@ -35,7 +36,7 @@ const path = `${BASE}/posts/${postId}/`;
 
   if (counter && window.location.origin === counter.dataset.siteOrigin) {
     const element = counter;
-    const { counterOrigin, path } = element.dataset;
+    const { counterOrigin, path, assetBase = "" } = element.dataset;
 
     if (counterOrigin && path) {
       const origin = counterOrigin;
@@ -73,7 +74,10 @@ const path = `${BASE}/posts/${postId}/`;
 
         const script = document.createElement("script");
         script.async = true;
-        script.src = "https://gc.zgo.at/count.js";
+        script.src = `${assetBase}/vendor/goatcounter/count.js`;
+        script.integrity =
+          "sha384-2UjvVpptg4JlEVgJI2PdscrjOjPcil/4F1ZvIMJ81CShQnEDSlPI+l4PfogvTLYi";
+        script.crossOrigin = "anonymous";
         script.dataset.goatcounter = `${origin}/count`;
         script.dataset.goatcounterSettings = JSON.stringify({ path: countPath });
         document.head.append(script);

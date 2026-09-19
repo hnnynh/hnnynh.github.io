@@ -25,21 +25,11 @@ const {
       jsonLd={jsonLd}
     />
 
-    <script is:inline>
-      let dark = false;
-      if (localStorage.getItem("darkMode")) {
-        dark = JSON.parse(localStorage.getItem("darkMode") ?? "false");
-      } else {
-        dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-      }
-
-      var root = document.getElementsByTagName("html")[0];
-      if (dark) {
-        root.classList.add("dark");
-      } else {
-        root.classList.remove("dark");
-      }
-    </script>
+    <script
+      is:inline
+      src="/theme-init.js"
+      integrity="sha384-sm9kRGNKkQXZbXA3d1/f1IAURgdONnPaLLhGO8LsNJtsgMgfxSyW83Vta3hTt1Ou"
+    ></script>
 
     <style is:global>
       @reference "../styles/global.css";

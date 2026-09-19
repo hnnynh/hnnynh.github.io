@@ -1,5 +1,5 @@
 ---
-title: "Inference Engineering:  Models"
+title: "Inference Engineering: Models"
 description: "Study notes on neural networks, Transformers, attention, decoder-only LLMs, mixture-of-experts models, and the prefill/decode split."
 pubDate: "Sep 20 2026"
 published: true
@@ -19,7 +19,7 @@ A neural network is a trainable function that transforms an input through multip
 
 - A neuron calculates `input * weight + bias`. A linear layer combines many such operations, while an activation function adds nonlinearity.
 - Training repeats a simple cycle: calculate an output, measure the error, backpropagate it, and update the weights.
-- ReLU, or Rectified Linear Unit, outputs `0` for negative inputs and leaves positive inputs unchanged. Because its output does not change by a constant ratio as the input changes, it is nonlinear.
+- ReLU, or Rectified Linear Unit, outputs `0` for negative inputs and leaves positive inputs unchanged. It is piecewise linear, but it is not a single linear transformation across the full input range, so it adds nonlinearity.
 
 [IBM: What are neural networks?](https://www.ibm.com/kr-ko/think/topics/neural-networks)
 
@@ -144,7 +144,7 @@ MoE can increase model capacity without increasing FLOPs per token by the same a
 
 ### Inference considerations
 
-- **Memory follows the total parameter count.** All expert weights must be available in GPU memory because the selected expert can vary by token.
+- **Memory follows the total parameter count.** In GPU-resident serving, the weights for any expert that a token may select must be available in GPU memory. Expert parallelism can shard those weights across GPUs, while offloading trades memory capacity for transfer latency.
 - **Larger batches can dilute the savings.** Tokens in a batch may select different experts, activating most experts at once.
 - **Load imbalance matters.** If the router repeatedly selects one expert, only the GPU that hosts it becomes busy. Expert parallelism and balanced routing are needed.
 - Decode remains **memory-bound** even when the active parameter count is small.
