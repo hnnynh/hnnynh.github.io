@@ -1,0 +1,194 @@
+---
+title: "Inference Engineering:  Models"
+description: "Study notes on neural networks, Transformers, attention, decoder-only LLMs, mixture-of-experts models, and the prefill/decode split."
+pubDate: "Sep 20 2026"
+published: true
+category: "AI"
+tags: ["LLM", "AI", "Inference"]
+---
+
+> Source: Philip Kiely, *Inference Engineering*, Chapter 2, "Models."
+
+The chapter moves from neural networks and Transformers to decoder-only LLMs, then connects those ideas to prefill, decode, and inference optimization.
+
+## 1. Neural networks
+
+A neural network is a trainable function that transforms an input through multiple layers of numbers to produce an output.
+
+> Input layer (output) → Hidden layer (input and output) → Output layer
+
+- A neuron calculates `input * weight + bias`. A linear layer combines many such operations, while an activation function adds nonlinearity.
+- Training repeats a simple cycle: calculate an output, measure the error, backpropagate it, and update the weights.
+- ReLU, or Rectified Linear Unit, outputs `0` for negative inputs and leaves positive inputs unchanged. Because its output does not change by a constant ratio as the input changes, it is nonlinear.
+
+[IBM: What are neural networks?](https://www.ibm.com/kr-ko/think/topics/neural-networks)
+
+## 2. Transformers
+
+A Transformer is a neural-network architecture that uses attention to calculate relationships among elements in a sequence.
+
+- It processes many tokens in parallel and directly calculates how strongly each token relates to other tokens.
+- An RNN, or Recurrent Neural Network, processes tokens in order.
+
+### Transformer model families
+
+- Diffusion models start with random noise and refine it through repeated denoising toward a likely output. They are commonly used for images and video, and are outside the scope of these notes.
+- Autoregressive models start with a tokenized sequence and predict the most likely next token. LLMs use this approach.
+  - A token is a number representing a piece of text.
+  - A tokenizer maps strings to their corresponding numeric token representations and back.
+
+```text
+Input sequence (a group of tokens)
+  → tokenization
+  → prefill (create the KV cache)
+  → decode (calculate logits, adjust probabilities, sample a token, append it)
+  → repeat
+  → output sequence
+  → stop at an EOS token, the context-window limit, or the maximum-token limit
+```
+
+### Common inference parameters
+
+- **Temperature:** adjusts logits before normalization and controls randomness. Higher values produce more random output.
+- **Top-k:** selects the next token from the `k` tokens with the highest probabilities.
+- **Top-p:** selects the next token from the smallest set whose cumulative probability reaches `p`.
+
+### Transformer blocks
+
+A Transformer repeats the same block structure many times. Each block functions as a hidden layer.
+
+1. **Self-attention** updates each token's representation by referring to other tokens in the same sequence. It captures grammatical, referential, and semantic relationships to preserve context.
+2. **Feed-forward neural network (FFN)** independently transforms the context-aware vector for each token. FFNs account for a large share of a Transformer's weights.
+3. **Residual connection** adds a sublayer's input to its output, preserving information and helping deep networks train reliably.
+4. **Normalization** adjusts value ranges to stabilize training and inference.
+
+[Wikidocs: Transformer architecture](https://wikidocs.net/338231)
+
+## 3. Attention Is All You Need
+
+*Attention Is All You Need* is the 2017 paper that introduced the Transformer.
+
+The paper showed that sequence processing could center on attention instead of recurrence or convolution.
+
+### Earlier approaches
+
+- **RNN, or Recurrent Neural Network:** processes tokens in order, which makes parallelization difficult and lengthens the path over which distant information travels.
+- **CNN, or Convolutional Neural Network:** starts with local relationships and expands its receptive field across layers.
+
+### The Transformer approach
+
+- **Self-attention:** calculates relationships between all tokens directly within one layer.
+- **Multi-head attention:** lets multiple attention heads examine different relationships in parallel.
+- **Positional encoding:** adds token-order information.
+- Reducing sequential computation makes training easier to parallelize.
+
+> The title does not mean a Transformer contains only attention. Transformers also use feed-forward layers, residual connections, and normalization. Attention replaces recurrence and convolution as the center of the sequence model.
+
+### Attention
+
+Attention lets a Transformer relate one token to other tokens in its sequence.
+
+- **Q, or Query:** represents what the current token is looking for.
+- **K, or Key:** represents the information each token offers.
+- **V, or Value:** contains the information that can be retrieved.
+
+Attention proceeds in five steps:
+
+1. Compare the current token's query with every token's key.
+2. Calculate a relevance score.
+3. Normalize the scores.
+4. Take a weighted sum of the values.
+5. Create a new token representation that includes context.
+
+For the sentence "The cat sat on the mat.", take `cat` as the current token. Its query is compared with the keys of `The`, `sat`, `on`, and `mat`. The resulting scores determine how strongly the values for those tokens contribute to `cat`'s new representation.
+
+**Self-attention** generates Q, K, and V from hidden states in the same sequence, so it models relationships within that sequence.
+
+**Cross-attention** takes Q from the current sequence and K and V from another sequence, allowing the current sequence to refer to external information.
+
+> Attention scales as **O(N²)** with sequence length `N` when processing the full input. Longer contexts therefore increase attention compute and memory use.
+
+### Self-attention and causal masking
+
+Generative LLMs use self-attention, but they must not see future tokens during generation.
+
+A **causal mask** hides tokens after the current position, allowing a token to attend only to earlier tokens.
+
+## 4. Decoder-only LLMs
+
+Most general-purpose generative LLMs use decoder-only Transformers, although other architectures suit other tasks.
+
+- **Encoder-only:** understands an input bidirectionally and works well for classification and search. Example: BERT.
+- **Encoder-decoder:** understands an input and then generates an output, which works well for translation and summarization. Example: T5.
+- **Decoder-only:** repeatedly generates the next token from earlier tokens. Examples: GPT, Llama, and Qwen.
+
+Decoder-only models use next-token prediction for both training and inference. That shared objective has made them easy to scale across many generation tasks.
+
+```text
+Prompt → causal self-attention → select and append the next token → repeat
+```
+
+## 5. Mixture of Experts (MoE)
+
+An MoE model divides a Transformer's FFN into multiple experts and chooses only some of them for each token.
+
+- **Dense model:** every token passes through every weight.
+- **MoE:** a router chooses the top `k` experts for each token and sends it only to those experts. For example, it might select 2 of 8 experts.
+- This separates the model's total parameter count from the parameters active for one token.
+  - Mixtral 8x7B has roughly 47B total parameters, while about 13B are active per token.
+  - Examples include Mixtral, DeepSeek-V3, and Qwen MoE models.
+
+### Why MoE is used
+
+MoE can increase model capacity without increasing FLOPs per token by the same amount. It can therefore pursue the quality of a larger model within a similar compute budget.
+
+### Inference considerations
+
+- **Memory follows the total parameter count.** All expert weights must be available in GPU memory because the selected expert can vary by token.
+- **Larger batches can dilute the savings.** Tokens in a batch may select different experts, activating most experts at once.
+- **Load imbalance matters.** If the router repeatedly selects one expert, only the GPU that hosts it becomes busy. Expert parallelism and balanced routing are needed.
+- Decode remains **memory-bound** even when the active parameter count is small.
+
+## 6. Connection to LLM inference
+
+### Prefill: compute-bound
+
+- Processes all input tokens in parallel.
+- Calculates K and V for each token and stores them in the KV cache.
+- Is mainly compute-bound.
+- Determines TTFT, or Time To First Token.
+
+### Decode: memory-bound
+
+- Reads from and updates the KV cache.
+- Generates one new token per forward pass.
+- Is mainly memory-bound because the model weights are read repeatedly for each token.
+- Determines TPS, or Tokens Per Second.
+
+### KV cache
+
+A KV cache stores the K and V values for earlier tokens so decode avoids repeating the same attention calculation. The cache reduces compute, although longer context windows consume more GPU memory.
+
+The roofline model visualizes performance limits and bottlenecks through arithmetic intensity.
+
+### Attention optimization
+
+Attention is one of the most expensive operations in both prefill and decode.
+
+- **Implementation improvements** use kernels that handle memory and computation more efficiently.
+  - **FlashAttention** reduces GPU-memory reads and writes for intermediate attention results.
+  - **PagedAttention** manages the KV cache in fixed-size pages to reduce fragmentation and wasted memory.
+- **Algorithmic improvements** seek better-than-O(N²) scaling while minimizing quality loss.
+  - **Sliding Window Attention** attends only to a recent range of tokens, reducing the cost of long contexts.
+  - Gate Attention
+  - Linear Attention
+
+## Key points
+
+1. A neural network is a trainable function that repeatedly transforms an input through layers.
+2. A Transformer uses attention to calculate relationships between tokens in a sequence.
+3. *Attention Is All You Need* proposed centering sequence models on attention instead of recurrence and convolution.
+4. Most modern general-purpose generative LLMs use decoder-only Transformers.
+5. A decoder-only LLM uses causal masking to look only at earlier tokens and repeatedly generates the next one.
+6. Prefill is mainly limited by compute performance, while decode is mainly limited by memory bandwidth.
+7. Attention and the KV cache are central to LLM inference optimization.
