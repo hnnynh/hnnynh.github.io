@@ -1,0 +1,331 @@
+---
+title: "Tracing xds-grpc and sds-grpc in an Istio Sidecar"
+description: "Follow the two static Envoy clusters in an Istio sidecar from bootstrap configuration, through local Unix sockets and pilot-agent, to ADS, Delta xDS, and SDS."
+pubDate: "Sep 20 2026"
+published: true
+category: "Istio"
+tags: ["Istio", "Envoy", "xDS", "Kubernetes"]
+---
+
+While checking Envoy retry metrics, two clusters stood out:
+
+```text
+envoy_cluster_upstream_rq_retry_overflow{cluster_name="sds-grpc"} 0
+envoy_cluster_upstream_rq_retry_overflow{cluster_name="xds-grpc"} 0
+```
+
+Both are static clusters in the Envoy bootstrap configuration. They point at Unix domain sockets inside the sidecar container rather than at application Services.
+
+I followed those clusters from Envoy's discovery model to the local `pilot-agent`, then to Istiod. The examples come from one workload sidecar running Istio 1.28, with service names and addresses changed. Generated bootstrap paths and defaults can differ by Istio version, installation options, and data-plane mode, so check the target workload as well.
+
+```text
+Envoy
+  ├─ xds-grpc ──> /etc/istio/proxy/XDS ──> pilot-agent ──> istiod
+  │                LDS, CDS, RDS, EDS over ADS
+  │
+  └─ sds-grpc ──> workload-spiffe-uds/socket ──> pilot-agent
+                   workload certificate, private key, root CA
+```
+
+## Start with service discovery
+
+Service discovery turns a logical upstream name into destinations Envoy can connect to. A cluster describes how Envoy finds and uses an upstream. It does not always contain the final endpoint list.
+
+| Discovery type | Where destinations come from | A good fit |
+| --- | --- | --- |
+| `STATIC` | Explicit addresses or Unix sockets in configuration | Fixed local dependencies and bootstrap services |
+| `STRICT_DNS` | Every IP returned by asynchronous DNS resolution | A DNS name whose answer is the backend set |
+| `LOGICAL_DNS` | The current DNS result when opening a new connection | A DNS load balancer or an endpoint whose answer changes often |
+| `ORIGINAL_DST` | The original destination preserved by traffic interception | Transparent proxying and passthrough traffic |
+| `EDS` | Endpoint Discovery Service over xDS | Mesh services with dynamically changing endpoints |
+
+The DNS modes differ in how they handle connections. `STRICT_DNS` tracks the resolved IP set as cluster membership and can drain connections to removed addresses. `LOGICAL_DNS` keeps a logical hostname and uses the latest answer for new connections, so a changed DNS answer does not become a membership reconciliation event.
+
+`ORIGINAL_DST` uses the original destination as the upstream. When traffic is redirected to Envoy and retains that destination, Envoy needs no separate endpoint lookup. Istio uses this for passthrough paths.
+
+With `EDS`, Envoy asks the control plane for named endpoint resources. The response can include addresses, locality, health, weight, priority, and metadata. Application clusters in Istio often have `type: EDS`; the clusters that let Envoy reach its control-plane helpers have to exist at startup.
+
+For a custom discovery mechanism, Envoy also supports extension-backed `cluster_type` definitions. For example, dynamic forward proxy can populate a DNS cache from request destinations. Istio does not expose every Envoy extension as a first-class API; an `EnvoyFilter` is the usual escape hatch when that level of customization is necessary.
+
+## xDS is the configuration channel
+
+xDS is a family of discovery APIs. In an Istio sidecar, its most familiar members are:
+
+| API | Resource | Practical question it answers |
+| --- | --- | --- |
+| LDS | Listener | Which connections should Envoy accept and how should it process them? |
+| RDS | Route | Which cluster should an HTTP request use? |
+| CDS | Cluster | How should that logical upstream connect and load balance? |
+| EDS | Endpoint | Which concrete endpoints currently belong to an EDS cluster? |
+| SDS | Secret | Which workload certificate, key, and trust bundle should TLS use? |
+
+For a mesh service, the request path looks like this:
+
+```text
+Application request
+  → outbound listener (LDS)
+  → HTTP route selects a cluster (RDS)
+  → cluster defines policy and discovery (CDS)
+  → endpoint set supplies Pod IPs (EDS)
+  → TLS configuration obtains credentials (SDS)
+```
+
+CDS and EDS answer separate debugging questions. CDS defines an `outbound|port|subset|host` cluster, its load-balancing policy, connection settings, and often its EDS service name. EDS supplies the endpoint members for that named cluster. A `DestinationRule` can affect cluster traffic policy and subset labels. The labels constrain the endpoints selected for the subset.
+
+## LDS and RDS: from an intercepted request to a cluster
+
+Istio redirects application traffic to Envoy. An outbound listener matches the intercepted connection and chooses a filter chain. For HTTP traffic, the HTTP connection manager often references a route configuration through RDS:
+
+```yaml
+rds:
+  config_source:
+    ads: {}
+  route_config_name: checkout.default.svc.cluster.local:8080
+```
+
+That route configuration selects a cluster by name:
+
+```yaml
+routes:
+  - match:
+      prefix: /
+    route:
+      cluster: outbound|8080||checkout.default.svc.cluster.local
+```
+
+Envoy replaces a listener rather than changing it in place while it serves traffic. If the replacement needs dependent resources, it can remain in warming until the configuration arrives. Envoy then activates the new listener and drains the old one. This prevents a route from pointing at a cluster that has not arrived yet.
+
+For an external HTTPS host defined through a `ServiceEntry`, a listener can match SNI and use an outbound cluster. For a registry-known mesh Service, the listener and route point at the service's outbound cluster. Traffic that matches no configured service may be handled by a passthrough or black-hole path depending on mesh outbound-traffic policy.
+
+## CDS and EDS: define the upstream, then its members
+
+A typical mesh cluster has this shape:
+
+```yaml
+name: outbound|8080|stable|checkout.default.svc.cluster.local
+type: EDS
+connect_timeout: 10s
+lb_policy: LEAST_REQUEST
+eds_cluster_config:
+  eds_config:
+    ads: {}
+  service_name: outbound|8080|stable|checkout.default.svc.cluster.local
+```
+
+The cluster gets endpoint membership through ADS-backed EDS. It can also contain circuit-breaking, outlier-detection, TLS, and locality-aware load-balancing settings from Istio policy. An endpoint dump answers which addresses are usable now:
+
+```text
+ENDPOINT        STATUS   CLUSTER
+10.42.1.17:8080 HEALTHY  outbound|8080|stable|checkout.default.svc.cluster.local
+10.42.2.31:8080 HEALTHY  outbound|8080|stable|checkout.default.svc.cluster.local
+```
+
+This distinction helps when reading Envoy output. Circuit-breaker settings shown with an endpoint dump come from the cluster configuration; EDS updates endpoint membership. Subset labels influence endpoint selection, while CDS continues to define the cluster.
+
+## ADS sequences the APIs
+
+Envoy can use separate discovery streams. Aggregated Discovery Service (ADS) multiplexes xDS resource types over one bidirectional gRPC stream to one management server, which lets the control plane sequence related updates.
+
+A route change from cluster `X` to cluster `Y` illustrates the order. If the route arrives first, Envoy may select a cluster it has not received. The control plane can send the CDS and EDS updates before the RDS update. Updates are asynchronous, but ADS lets the server respect this dependency.
+
+Envoy validates each response and replies on the stream:
+
+```text
+istiod  ── DiscoveryResponse ──> Envoy
+istiod  <── DiscoveryRequest  ── Envoy   (ACK or NACK)
+```
+
+For Delta xDS, the response nonce pairs a `DeltaDiscoveryResponse` with the subsequent request. The presence of `error_detail` indicates a NACK; a version field alone is not a reliable NACK signal. ADS keeps acknowledgement state logically separate by resource `type_url`, so a route NACK is not an acknowledgement of an earlier cluster response.
+
+Istio's current reference documents `ISTIO_DELTA_XDS` with a default of `true`. Delta xDS communicates added, changed, and removed resources instead of resending an entire state of the world for every change. The server can still send unchanged resources when needed.
+
+## The bootstrap breaks the chicken-and-egg problem
+
+Envoy needs a way to fetch its first dynamic configuration. It reads the bootstrap file at startup, which contains the static configuration needed to reach discovery services.
+
+The generated Istio bootstrap contains a static `xds-grpc` cluster and points ADS at it:
+
+```yaml
+static_resources:
+  clusters:
+    - name: xds-grpc
+      type: STATIC
+      connect_timeout: 1s
+      load_assignment:
+        cluster_name: xds-grpc
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    pipe:
+                      path: ./etc/istio/proxy/XDS
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+
+dynamic_resources:
+  ads_config:
+    api_type: DELTA_GRPC
+    grpc_services:
+      - envoy_grpc:
+          cluster_name: xds-grpc
+    set_node_on_first_message_only: true
+    transport_api_version: V3
+  cds_config:
+    ads: {}
+  lds_config:
+    ads: {}
+```
+
+The relative path is evaluated in the proxy container's working context; the corresponding absolute path is normally `/etc/istio/proxy/XDS`. It is a Unix domain socket, not a TCP address for Istiod.
+
+`xds-grpc` is static because Envoy needs it before receiving CDS. As a bootstrap static resource, CDS does not create, replace, or remove it. It appears with application clusters in Envoy statistics, though it has a different job.
+
+## What sits behind `/etc/istio/proxy/XDS`?
+
+Inside a sidecar container, `pilot-agent` is the main process. It prepares local services, starts and supervises Envoy, handles readiness and draining, and proxies the local xDS connection upstream to Istiod.
+
+You can inspect the path and the processes in a running workload:
+
+```bash
+kubectl exec deploy/checkout -c istio-proxy -- \
+  ls -l /etc/istio/proxy/XDS
+
+kubectl exec deploy/checkout -c istio-proxy -- \
+  sh -c 'ss -xlp | grep /etc/istio/proxy/XDS'
+
+kubectl exec deploy/checkout -c istio-proxy -- \
+  ps -ef | grep -E 'pilot-agent|envoy'
+```
+
+Expected roles:
+
+```text
+pilot-agent (PID 1)
+  ├─ listens on the local XDS Unix socket
+  ├─ maintains the upstream connection to Istiod
+  └─ launches and manages Envoy
+
+envoy
+  ├─ proxies application traffic
+  └─ opens the local gRPC ADS stream through xds-grpc
+```
+
+The local xDS connection looks like this:
+
+```text
+Envoy
+  ── gRPC ADS over UDS ──> /etc/istio/proxy/XDS
+                                │
+                                ▼
+                           pilot-agent
+                                │
+                        xDS connection upstream
+                                │
+                                ▼
+                              istiod
+```
+
+Envoy uses a stable local bootstrap destination. `pilot-agent` handles sidecar setup and the upstream control-plane connection. Use `istioctl proxy-config` or Envoy's config dump to inspect the configuration Envoy actually received.
+
+```bash
+istioctl proxy-config bootstrap deploy/checkout.default
+istioctl proxy-config clusters deploy/checkout.default
+istioctl proxy-config endpoints deploy/checkout.default
+```
+
+## `sds-grpc` follows the same pattern for credentials
+
+SDS, or Secret Discovery Service, dynamically supplies TLS material. A generated cluster can look like this:
+
+```yaml
+- name: sds-grpc
+  type: STATIC
+  connect_timeout: 1s
+  load_assignment:
+    cluster_name: sds-grpc
+    endpoints:
+      - lb_endpoints:
+          - endpoint:
+              address:
+                pipe:
+                  path: ./var/run/secrets/workload-spiffe-uds/socket
+  typed_extension_protocol_options:
+    envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+      "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+      explicit_http_config:
+        http2_protocol_options: {}
+```
+
+The associated TLS configuration refers to `sds-grpc` rather than embedding a certificate and private key in every application cluster:
+
+```yaml
+tls_certificate_sds_secret_configs:
+  - name: default
+    sds_config:
+      api_config_source:
+        api_type: GRPC
+        grpc_services:
+          - envoy_grpc:
+              cluster_name: sds-grpc
+
+validation_context_sds_secret_config:
+  name: ROOTCA
+  sds_config:
+    api_config_source:
+      api_type: GRPC
+      grpc_services:
+        - envoy_grpc:
+            cluster_name: sds-grpc
+```
+
+Envoy uses `sds-grpc` to open a local gRPC stream to a second `pilot-agent` Unix socket. The agent obtains or rotates workload credentials and provides the workload certificate, private key, and trust material without restarting Envoy. Socket paths have changed across Istio releases, so inspect the generated bootstrap for the workload you are debugging.
+
+```text
+Envoy
+  ── gRPC SDS over UDS ──> workload-spiffe-uds/socket
+                                │
+                                ▼
+                           pilot-agent
+                                │
+                     certificate and trust handling
+                                │
+                                ▼
+                         Istiod / Istio CA
+```
+
+## A practical debugging checklist
+
+When `xds-grpc` or `sds-grpc` shows errors or retry metrics, check the local dependency before investigating application Services.
+
+1. Inspect bootstrap configuration to confirm the cluster type, UDS path, and ADS/SDS references.
+2. Confirm the socket exists and that `pilot-agent` is listening on it.
+3. Check the `pilot-agent` logs for upstream xDS or CA connection failures.
+4. Use `istioctl proxy-status` to see sent and acknowledged xDS versions.
+5. Use `istioctl proxy-config clusters`, `routes`, and `endpoints` to separate an application-config problem from an agent or control-plane problem.
+
+`envoy_cluster_upstream_rq_retry_overflow` is a cluster-level counter. A value of zero for these bootstrap clusters means the cluster did not reject a retry because its retry limit was exhausted. Check connection, request-failure, and proxy-sync information as well.
+
+## Summary
+
+`xds-grpc` and `sds-grpc` are static control-plane clusters inside the sidecar:
+
+```text
+xds-grpc
+  Static bootstrap cluster → local UDS → pilot-agent → ADS/xDS → Istiod
+
+sds-grpc
+  Static bootstrap cluster → local UDS → pilot-agent → SDS → workload credentials
+```
+
+## Sources
+
+- [Envoy service discovery](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/service_discovery)
+- [Envoy dynamic configuration and xDS](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/operations/dynamic_configuration.html)
+- [Envoy xDS protocol](https://www.envoyproxy.io/docs/envoy/latest/api-docs/xds_protocol)
+- [Envoy Secret Discovery Service](https://www.envoyproxy.io/docs/envoy/latest/configuration/security/secret)
+- [Istio traffic management](https://istio.io/latest/docs/concepts/traffic-management/)
+- [Istio `pilot-agent` reference](https://istio.io/latest/docs/reference/commands/pilot-agent/)
+- [Istio `istioctl` reference](https://istio.io/latest/docs/reference/commands/istioctl/)
