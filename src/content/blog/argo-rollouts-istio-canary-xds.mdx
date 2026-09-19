@@ -642,7 +642,7 @@ istioctl proxy-status
   - GitOps tools should ignore or coordinate those controller-owned fields.
 - Do not rely on the event order of Service, EndpointSlice, VirtualService, and DestinationRule.
 
-Shortest mental model:
+For a quick reference:
 
 - Route selection → VirtualService → RDS
 - Endpoint membership → EndpointSlice or DestinationRule subset labels → EDS

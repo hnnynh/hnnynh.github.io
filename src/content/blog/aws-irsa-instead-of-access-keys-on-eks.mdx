@@ -48,7 +48,7 @@ Kubernetes Secrets are base64-encoded, not encrypted by default in a way that re
 If long-lived AWS credentials are leaked, the impact can be severe.
 Even when credentials are managed outside the application, the mechanism used to access those credentials can face similar security concerns.
 
-IRSA improves this model:
+IRSA scopes AWS access to the workload's ServiceAccount:
 
 - Least privilege: assign minimal IAM policies to a specific role.
 - Workload scoping: grant access only to Pods using a specific ServiceAccount.
@@ -86,13 +86,11 @@ It also improves some operational aspects:
 - A single IAM role can be reused across multiple clusters and ServiceAccounts.
 - Credential load is handled at the node level instead of duplicated per Pod.
 
-The core idea is still similar: associate an IAM role with a Kubernetes ServiceAccount.
-The implementation differs, and EKS Pod Identity is specific to EKS.
+EKS Pod Identity also associates an IAM role with a Kubernetes ServiceAccount. Its implementation is specific to EKS.
 
 ## Applying IRSA
 
-The goal is to replace access-key-based environment variables or mounted credentials with a ServiceAccount mapped to an IAM role.
-The process follows AWS documentation for assigning IAM roles to Kubernetes ServiceAccounts.
+Replace access-key-based environment variables or mounted credentials with a ServiceAccount mapped to an IAM role. The process follows AWS documentation for assigning IAM roles to Kubernetes ServiceAccounts.
 
 ### 1. Check the OIDC Provider
 

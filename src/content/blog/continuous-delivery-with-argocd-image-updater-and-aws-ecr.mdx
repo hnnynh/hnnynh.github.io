@@ -32,10 +32,7 @@ Argo CD was configured to track that repository.
 
 ### Continuous Delivery
 
-Argo CD watches the GitHub repository and synchronizes it with the cluster for CD, while Jenkins handles CI.
-Then how should the Continuous Delivery step between them work?
-
-After a new image was pushed to ECR, the image tag in the repository containing the Kubernetes manifests needed to be updated.
+Argo CD watches the GitHub repository and synchronizes it with the cluster for CD, while Jenkins handles CI. After a new image was pushed to ECR, the image tag in the repository containing the Kubernetes manifests still needed to be updated.
 
 One option was to update GitHub directly from the Jenkins pipeline.
 However, pushing commits from Jenkins through SSH adds operational complexity and does not use Argo CD's visibility as effectively.
@@ -52,10 +49,10 @@ Since Argo CD was already responsible for deployment, letting Argo CD handle the
 
 As the description says, it is an Argo CD tool that automatically updates container images.
 
-One thing to note is that it is still under active development, so it is not recommended for critical environments.
+Argo CD Image Updater was still under active development, so it was not recommended for critical environments.
 At the time of writing, v1 had not been released yet, and the latest version was v0.15.1.
 
-The features that mattered most for this project's Continuous Delivery flow were:
+This Continuous Delivery flow needed:
 
 - Tracking private ECR image updates with `latest` / `newest-build`
 - Managing application manifests with Kustomize
@@ -185,10 +182,10 @@ volumes:
 
 ## Argo CD
 
-Next, Argo CD and Argo CD Image Updater need to be connected.
+Connect Argo CD and Argo CD Image Updater.
 If they are running in the same cluster and namespace, no separate Argo CD endpoint setting is required.
 
-The important point is that annotations must be added to the Argo CD Application.
+Add the annotations to the Argo CD Application.
 
 ### GitHub Token
 
@@ -217,7 +214,7 @@ argocd-image-updater.argoproj.io/org_app.update-strategy: latest # latest/newest
 argocd-image-updater.argoproj.io/write-back-method: git:secret:argocd/git-cred # GitHub Secret
 ```
 
-At this point, the setup is complete: when the ECR repository is updated, the image tag in the GitHub repository is automatically updated.
+When the ECR repository is updated, the image tag in the GitHub repository is updated automatically.
 
 ![Argo CD Image Updater application annotations](../../assets/posts/argocd-image-updater-02.png)
 
@@ -252,5 +249,4 @@ After pressing Sync, the image was updated through the configured `RollingUpdate
 
 ## Closing
 
-Argo CD Image Updater can connect ECR image updates to Git-based Kubernetes manifests without putting tag update logic directly into Jenkins.
-For non-critical environments, it provides a practical way to automate image tag updates while keeping Argo CD as the deployment control point.
+Argo CD Image Updater connects ECR image updates to Git-based Kubernetes manifests without adding tag-update logic to Jenkins. For non-critical environments, it automates image-tag updates while Argo CD remains the deployment control point.

@@ -9,8 +9,6 @@ tags: ["Auth", "Backend"]
 
 > Translated from the original Velog post: [[OAuth] 소셜로그인을 위한 OAuth 2.0](https://velog.io/@hnnynh/OAuth-%EC%86%8C%EC%85%9C%EB%A1%9C%EA%B7%B8%EC%9D%B8%EC%9D%84-%EC%9C%84%ED%95%9C-OAuth-2.0)
 
-This post summarizes OAuth 2.0 from the perspective of social login.
-
 ## Authentication and Authorization
 
 Authentication identifies who the user is.
@@ -27,7 +25,7 @@ Instead, the authorization server issues tokens that allow limited access.
 
 OAuth 2.0 is widely used for social login because providers such as Google use it for authorization and consent.
 
-Social login is an implementation built on this structure:
+In a social login flow:
 
 - A service wants to use information from a provider such as Google.
 - The user authenticates with Google.
@@ -67,9 +65,7 @@ Example: Google's OAuth server.
 
 ## OAuth Summary
 
-OAuth allows a third-party client to receive limited access to protected resources.
-
-For Google social login:
+For Google social login, the roles are:
 
 - Protected resource: Google account information
 - Resource owner: Google account user
@@ -171,7 +167,4 @@ It delegates access to provider data so the service can identify the user and th
 
 ## Summary
 
-OAuth is a delegated authorization framework.
-In social login, it allows a service to obtain approved user information from a provider such as Google without handling the user's Google password.
-
-The service usually uses returned identifiers, such as email or provider-specific user ID, to create or match an internal user account.
+After receiving approved provider data, the service usually uses an identifier, such as an email address or provider-specific user ID, to create or match an internal account.
